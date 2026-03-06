@@ -1,8 +1,6 @@
 use std::cell::Cell;
 
-use agent_core::{
-    Agent, AgentContext, HttpBackend, LlmClient, LlmConfig, Message,
-};
+use agent_core::{Agent, AgentContext, HttpBackend, LlmClient, LlmConfig, Message};
 use serde::Deserialize;
 use worker::*;
 
@@ -55,16 +53,11 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.url()?;
 
     // Extract user ID from X-User-Id header or query param for local testing
-    let user_id = req
-        .headers()
-        .get("X-User-Id")
-        .ok()
-        .flatten()
-        .or_else(|| {
-            url.query_pairs()
-                .find(|(k, _)| k == "user_id")
-                .map(|(_, v)| v.to_string())
-        });
+    let user_id = req.headers().get("X-User-Id").ok().flatten().or_else(|| {
+        url.query_pairs()
+            .find(|(k, _)| k == "user_id")
+            .map(|(_, v)| v.to_string())
+    });
 
     let user_id = match user_id {
         Some(id) if !id.is_empty() => id,
@@ -240,10 +233,7 @@ impl AgentDo {
     fn load_system_prompt(&self) -> String {
         let sql = self.state.storage().sql();
         let none: Option<Vec<SqlStorageValue>> = None;
-        let cursor = match sql.exec(
-            "SELECT value FROM prefs WHERE key = 'system_prompt'",
-            none,
-        ) {
+        let cursor = match sql.exec("SELECT value FROM prefs WHERE key = 'system_prompt'", none) {
             Ok(c) => c,
             Err(_) => return "You are a helpful AI assistant.".to_string(),
         };

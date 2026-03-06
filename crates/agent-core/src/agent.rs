@@ -17,6 +17,7 @@ impl<H: HttpBackend> Agent<H> {
         }
     }
 
+    #[allow(clippy::never_loop)] // All branches return by design — the loop is for future inline tool execution
     pub async fn run(
         &self,
         mut ctx: AgentContext,
@@ -96,6 +97,7 @@ impl<H: HttpBackend> Agent<H> {
         Err(AgentError::MaxIterationsExceeded(self.max_iterations))
     }
 
+    #[allow(clippy::never_loop)] // Same as run() — returns to DO at every tool-call boundary
     pub async fn resume(
         &self,
         mut ctx: AgentContext,
