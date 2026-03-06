@@ -1,0 +1,21 @@
+name = "edgeclaw"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-01-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[[durable_objects.bindings]]
+name = "AGENT_DO"
+class_name = "AgentDo"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentDo"]
+
+[vars]
+CLAUDE_MODEL = "claude-sonnet-4-20250514"
+
+# Override via .dev.vars locally or `wrangler secret put` for production:
+# ANTHROPIC_API_KEY
+# ANTHROPIC_BASE_URL (optional)

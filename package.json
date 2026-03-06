@@ -1,0 +1,7 @@
+{
+  "name": "edgeclaw",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^3"
+  }
+}
