@@ -10,6 +10,23 @@ pub struct SkillRow {
     pub url: String,
     pub tools_json: String,
     pub added_at: i64,
+    #[serde(default)]
+    pub auth_header_name: Option<String>,
+    #[serde(default)]
+    pub auth_header_value: Option<String>,
+}
+
+fn build_extra_headers(
+    auth_header_name: Option<&str>,
+    auth_header_value: Option<&str>,
+) -> Vec<(String, String)> {
+    match auth_header_value {
+        Some(value) => {
+            let name = auth_header_name.unwrap_or("authorization").to_string();
+            vec![(name, value.to_string())]
+        }
+        None => vec![],
+    }
 }
 
 struct RegisteredSkill<H: HttpBackend> {
@@ -35,7 +52,11 @@ impl<H: HttpBackend> SkillRegistry<H> {
                 serde_json::from_str(&row.tools_json).map_err(|e| {
                     AgentError::McpError(format!("Bad cached tools for {}: {e}", row.name))
                 })?;
-            let client = McpClient::new(backend_factory(), row.url);
+            let extra_headers = build_extra_headers(
+                row.auth_header_name.as_deref(),
+                row.auth_header_value.as_deref(),
+            );
+            let client = McpClient::new(backend_factory(), row.url, extra_headers);
             skills.push(RegisteredSkill {
                 name: row.name,
                 tools,
@@ -53,8 +74,12 @@ impl<H: HttpBackend> SkillRegistry<H> {
         url: String,
         backend: H,
         now: i64,
+        auth_header_name: Option<String>,
+        auth_header_value: Option<String>,
     ) -> Result<SkillRow, AgentError> {
-        let client = McpClient::new(backend, url.clone());
+        let extra_headers =
+            build_extra_headers(auth_header_name.as_deref(), auth_header_value.as_deref());
+        let client = McpClient::new(backend, url.clone(), extra_headers);
 
         // Initialize the MCP connection
         client.initialize().await?;
@@ -68,6 +93,8 @@ impl<H: HttpBackend> SkillRegistry<H> {
             url,
             tools_json,
             added_at: now,
+            auth_header_name,
+            auth_header_value,
         };
 
         self.skills.push(RegisteredSkill {
@@ -140,9 +167,11 @@ mod tests {
     use async_trait::async_trait;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     struct MockHttpBackend {
         responses: RefCell<VecDeque<Vec<u8>>>,
+        captured_headers: Rc<RefCell<Vec<Vec<(String, String)>>>>,
     }
 
     impl MockHttpBackend {
@@ -154,6 +183,7 @@ mod tests {
                         .map(|s| s.as_bytes().to_vec())
                         .collect(),
                 ),
+                captured_headers: Rc::new(RefCell::new(Vec::new())),
             }
         }
 
@@ -167,9 +197,15 @@ mod tests {
         async fn post(
             &self,
             _url: &str,
-            _headers: &[(&str, &str)],
+            headers: &[(&str, &str)],
             _body: &[u8],
         ) -> Result<Vec<u8>, AgentError> {
+            self.captured_headers.borrow_mut().push(
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            );
             self.responses
                 .borrow_mut()
                 .pop_front()
@@ -195,6 +231,8 @@ mod tests {
             url: "http://localhost:8787".to_string(),
             tools_json,
             added_at: 1000,
+            auth_header_name: None,
+            auth_header_value: None,
         }];
 
         let registry = SkillRegistry::from_rows(rows, MockHttpBackend::empty).unwrap();
@@ -227,12 +265,16 @@ mod tests {
                 url: "http://mem:8787".to_string(),
                 tools_json: tool_a,
                 added_at: 1000,
+                auth_header_name: None,
+                auth_header_value: None,
             },
             SkillRow {
                 name: "http".to_string(),
                 url: "http://http:8787".to_string(),
                 tools_json: tool_b,
                 added_at: 1000,
+                auth_header_name: None,
+                auth_header_value: None,
             },
         ];
 
@@ -256,6 +298,8 @@ mod tests {
             url: "http://localhost:8787".to_string(),
             tools_json,
             added_at: 1000,
+            auth_header_name: None,
+            auth_header_value: None,
         }];
 
         let registry =
@@ -315,6 +359,8 @@ mod tests {
                 "http://localhost:8787".to_string(),
                 MockHttpBackend::new(vec![init_response, tools_response]),
                 12345,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -325,5 +371,51 @@ mod tests {
         let all = registry.all_tools();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].name, "websearch__search");
+    }
+
+    #[tokio::test]
+    async fn test_from_rows_with_auth_headers() {
+        let call_response = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}],"is_error":false}}"#;
+
+        let tools = vec![sample_tool_def()];
+        let tools_json = serde_json::to_string(&tools).unwrap();
+
+        let rows = vec![SkillRow {
+            name: "authed".to_string(),
+            url: "http://localhost:8787".to_string(),
+            tools_json,
+            added_at: 1000,
+            auth_header_name: Some("x-api-key".to_string()),
+            auth_header_value: Some("secret-key-123".to_string()),
+        }];
+
+        let captured = Rc::new(RefCell::new(Vec::<Vec<(String, String)>>::new()));
+        let captured_for_factory = captured.clone();
+
+        let registry = SkillRegistry::from_rows(rows, move || {
+            let responses: VecDeque<Vec<u8>> = vec![call_response.as_bytes().to_vec()]
+                .into_iter()
+                .collect();
+            MockHttpBackend {
+                responses: RefCell::new(responses),
+                captured_headers: captured_for_factory.clone(),
+            }
+        })
+        .unwrap();
+
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            name: "authed__search".to_string(),
+            input: serde_json::json!({"query": "test"}),
+        };
+
+        let result = registry.dispatch(&tool_call).await.unwrap();
+        assert_eq!(result.content, "ok");
+
+        let headers = captured.borrow();
+        assert_eq!(headers.len(), 1);
+        assert!(headers[0]
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "secret-key-123"));
     }
 }

@@ -79,6 +79,12 @@ curl -X POST http://localhost:8787/skills/add \
   -H "X-User-Id: test-user" \
   -d '{"name": "memory", "url": "http://localhost:8788"}'
 
+# Register a skill that requires auth
+curl -X POST http://localhost:8787/skills/add \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: test-user" \
+  -d '{"name": "authed", "url": "https://skill.example.com", "auth_header_name": "x-api-key", "auth_header_value": "sk-secret"}'
+
 # Now messages can trigger memory tools
 curl -X POST http://localhost:8787/message \
   -H "Content-Type: application/json" \
@@ -134,6 +140,27 @@ npm install
 npm test
 ```
 
+## Secrets & Environment Variables
+
+### Required secrets
+
+Set via `wrangler secret put <NAME>` for production, or in `.dev.vars` for local development.
+
+| Secret | Worker | Description |
+|--------|--------|-------------|
+| `ANTHROPIC_API_KEY` | `edgeclaw` (main) | Anthropic API key for LLM calls |
+| `SKILL_ENCRYPTION_KEY` | `edgeclaw` (main) | AES-256-GCM key for encrypting per-skill auth credentials stored in Durable Object SQLite. Use a random 32+ character string (e.g. `openssl rand -base64 32`). If unset, skill auth values are stored in plaintext. |
+| `BRAVE_SEARCH_API_KEY` | `skill-web-search` | Brave Search API key |
+
+### Optional environment variables
+
+Set in `wrangler.toml` `[vars]` or `.dev.vars`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_MODEL` | `claude-sonnet-4-20250514` | Anthropic model ID |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Anthropic API base URL |
+
 ## Deployment
 
 ### Main worker
@@ -141,6 +168,7 @@ npm test
 ```bash
 npx wrangler deploy
 npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put SKILL_ENCRYPTION_KEY
 ```
 
 ### Skill workers
@@ -186,15 +214,25 @@ Retrieve conversation history (last 50 messages).
 Register an MCP skill server. Connects, initializes, and discovers available tools.
 
 ```json
-// Request
+// Request (no auth)
 { "name": "memory", "url": "https://skill-memory.your-account.workers.dev" }
+
+// Request (with per-skill auth)
+{
+  "name": "authed-skill",
+  "url": "https://skill.example.com",
+  "auth_header_name": "authorization",
+  "auth_header_value": "Bearer sk-secret-token"
+}
 
 // Response
 { "skill": "memory", "tools": ["memory:memory_store", "memory:memory_retrieve", ...] }
 ```
 
+`auth_header_name` defaults to `"authorization"` if only `auth_header_value` is provided. Auth credentials are encrypted at rest with AES-256-GCM using the `SKILL_ENCRYPTION_KEY` secret.
+
 ### GET /skills
-List all registered skills with their cached tool definitions.
+List all registered skills with their cached tool definitions. Auth header values are masked in the response.
 
 ### POST /approve
 Approve or deny a pending destructive tool call.

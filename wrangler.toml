@@ -18,6 +18,7 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # Override via .dev.vars locally or `wrangler secret put` for production:
 # ANTHROPIC_API_KEY
+# SKILL_ENCRYPTION_KEY (AES-256-GCM key for per-skill auth credentials)
 # ANTHROPIC_BASE_URL (optional)
 
 # Service bindings for skill workers (requires skills to be deployed first)

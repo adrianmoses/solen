@@ -1,5 +1,9 @@
 use std::cell::Cell;
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Key, Nonce,
+};
 use agent_core::{
     Agent, AgentContext, AgentRunResult, ContentBlock, HttpBackend, LlmClient, LlmConfig, Message,
     Role, ToolCall, ToolExecutor, ToolResult,
@@ -133,6 +137,40 @@ async fn handle_orchestrate(mut req: Request, env: &Env) -> Result<Response> {
 
 const DESTRUCTIVE_PATTERNS: &[&str] = &["delete", "remove", "send", "drop"];
 
+fn mask_secret(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 7 {
+        "***".to_string()
+    } else {
+        let prefix: String = chars[..4].iter().collect();
+        let suffix: String = chars[chars.len() - 3..].iter().collect();
+        format!("{prefix}...{suffix}")
+    }
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
+}
+
+fn derive_encryption_key(secret: &str) -> Key<Aes256Gcm> {
+    let mut key_bytes = [0u8; 32];
+    let secret_bytes = secret.as_bytes();
+    for (i, byte) in key_bytes.iter_mut().enumerate() {
+        *byte = secret_bytes[i % secret_bytes.len()];
+    }
+    *Key::<Aes256Gcm>::from_slice(&key_bytes)
+}
+
 fn is_destructive(tool_name: &str) -> bool {
     let lower = tool_name.to_lowercase();
     DESTRUCTIVE_PATTERNS
@@ -200,9 +238,63 @@ impl AgentDo {
                 key        TEXT PRIMARY KEY,
                 value      TEXT NOT NULL
             )",
-            none,
+            none.clone(),
         );
+        // Migration: add auth columns to skills table (safe if already exist)
+        let _ = sql.exec(
+            "ALTER TABLE skills ADD COLUMN auth_header_name TEXT",
+            none.clone(),
+        );
+        let _ = sql.exec("ALTER TABLE skills ADD COLUMN auth_header_value TEXT", none);
         self.initialized.set(true);
+    }
+
+    fn encrypt_secret(&self, plaintext: &str) -> String {
+        let secret = match self.env.secret("SKILL_ENCRYPTION_KEY") {
+            Ok(s) => s.to_string(),
+            Err(_) => return plaintext.to_string(),
+        };
+        let key = derive_encryption_key(&secret);
+        let cipher = Aes256Gcm::new(&key);
+
+        let mut nonce_bytes = [0u8; 12];
+        for byte in &mut nonce_bytes {
+            *byte = (js_sys::Math::random() * 256.0) as u8;
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        match cipher.encrypt(nonce, plaintext.as_bytes()) {
+            Ok(ciphertext) => {
+                let mut combined = nonce_bytes.to_vec();
+                combined.extend_from_slice(&ciphertext);
+                format!("enc:{}", to_hex(&combined))
+            }
+            Err(_) => plaintext.to_string(),
+        }
+    }
+
+    fn decrypt_secret(&self, stored: &str) -> String {
+        let encrypted_hex = match stored.strip_prefix("enc:") {
+            Some(hex) => hex,
+            None => return stored.to_string(), // plaintext (legacy)
+        };
+        let secret = match self.env.secret("SKILL_ENCRYPTION_KEY") {
+            Ok(s) => s.to_string(),
+            Err(_) => return stored.to_string(),
+        };
+        let key = derive_encryption_key(&secret);
+        let cipher = Aes256Gcm::new(&key);
+
+        let bytes = match from_hex(encrypted_hex) {
+            Some(b) if b.len() > 12 => b,
+            _ => return stored.to_string(),
+        };
+        let nonce = Nonce::from_slice(&bytes[..12]);
+
+        match cipher.decrypt(nonce, &bytes[12..]) {
+            Ok(plaintext) => String::from_utf8(plaintext).unwrap_or_else(|_| stored.to_string()),
+            Err(_) => stored.to_string(),
+        }
     }
 
     fn build_llm_config(&self) -> LlmConfig {
@@ -326,7 +418,10 @@ impl AgentDo {
     fn load_skills(&self) -> Vec<SkillRow> {
         let sql = self.state.storage().sql();
         let none: Option<Vec<SqlStorageValue>> = None;
-        let cursor = match sql.exec("SELECT name, url, tools, added_at FROM skills", none) {
+        let cursor = match sql.exec(
+            "SELECT name, url, tools, added_at, auth_header_name, auth_header_value FROM skills",
+            none,
+        ) {
             Ok(c) => c,
             Err(_) => return vec![],
         };
@@ -352,12 +447,22 @@ impl AgentDo {
                     SqlStorageValue::Float(f) => *f as i64,
                     _ => return None,
                 };
+                let auth_header_name = match values.get(4) {
+                    Some(SqlStorageValue::String(s)) => Some(s.clone()),
+                    _ => None,
+                };
+                let auth_header_value = match values.get(5) {
+                    Some(SqlStorageValue::String(s)) => Some(self.decrypt_secret(s)),
+                    _ => None,
+                };
 
                 Some(SkillRow {
                     name,
                     url,
                     tools_json,
                     added_at,
+                    auth_header_name,
+                    auth_header_value,
                 })
             })
             .collect()
@@ -370,9 +475,17 @@ impl AgentDo {
             row.url.clone().into(),
             row.tools_json.clone().into(),
             SqlStorageValue::Integer(row.added_at),
+            match &row.auth_header_name {
+                Some(s) => SqlStorageValue::String(s.clone()),
+                None => SqlStorageValue::Null,
+            },
+            match &row.auth_header_value {
+                Some(s) => SqlStorageValue::String(self.encrypt_secret(s)),
+                None => SqlStorageValue::Null,
+            },
         ];
         let _ = sql.exec(
-            "INSERT OR REPLACE INTO skills (name, url, tools, added_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO skills (name, url, tools, added_at, auth_header_name, auth_header_value) VALUES (?, ?, ?, ?, ?, ?)",
             Some(bindings),
         );
     }
@@ -591,6 +704,10 @@ impl AgentDo {
         struct AddSkillRequest {
             name: String,
             url: String,
+            #[serde(default)]
+            auth_header_name: Option<String>,
+            #[serde(default)]
+            auth_header_value: Option<String>,
         }
 
         let body: AddSkillRequest = req.json().await?;
@@ -601,7 +718,14 @@ impl AgentDo {
 
         let now = js_sys::Date::now() as i64;
         let row = registry
-            .register(body.name, body.url, WorkerFetchBackend, now)
+            .register(
+                body.name,
+                body.url,
+                WorkerFetchBackend,
+                now,
+                body.auth_header_name,
+                body.auth_header_value,
+            )
             .await
             .map_err(|e| Error::RustError(e.to_string()))?;
 
@@ -618,7 +742,12 @@ impl AgentDo {
     }
 
     fn handle_list_skills(&self) -> Result<Response> {
-        let rows = self.load_skills();
+        let mut rows = self.load_skills();
+        for row in &mut rows {
+            if let Some(ref value) = row.auth_header_value {
+                row.auth_header_value = Some(mask_secret(value));
+            }
+        }
         Response::from_json(&rows)
     }
 

@@ -8,6 +8,7 @@ pub struct McpClient<H: HttpBackend> {
     backend: H,
     server_url: String,
     next_id: std::cell::Cell<u64>,
+    extra_headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,11 +54,12 @@ enum ToolCallContent {
 }
 
 impl<H: HttpBackend> McpClient<H> {
-    pub fn new(backend: H, server_url: String) -> Self {
+    pub fn new(backend: H, server_url: String, extra_headers: Vec<(String, String)>) -> Self {
         Self {
             backend,
             server_url,
             next_id: std::cell::Cell::new(1),
+            extra_headers,
         }
     }
 
@@ -76,7 +78,10 @@ impl<H: HttpBackend> McpClient<H> {
         let body = serde_json::to_vec(&request).map_err(AgentError::Serialization)?;
 
         let url = format!("{}/mcp", self.server_url);
-        let headers = [("content-type", "application/json")];
+        let mut headers: Vec<(&str, &str)> = vec![("content-type", "application/json")];
+        for (k, v) in &self.extra_headers {
+            headers.push((k.as_str(), v.as_str()));
+        }
 
         let response_bytes = self.backend.post(&url, &headers, &body).await?;
 
@@ -184,9 +189,11 @@ mod tests {
     use async_trait::async_trait;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     struct MockHttpBackend {
         responses: RefCell<VecDeque<Vec<u8>>>,
+        captured_headers: Rc<RefCell<Vec<Vec<(String, String)>>>>,
     }
 
     impl MockHttpBackend {
@@ -198,6 +205,7 @@ mod tests {
                         .map(|s| s.as_bytes().to_vec())
                         .collect(),
                 ),
+                captured_headers: Rc::new(RefCell::new(Vec::new())),
             }
         }
     }
@@ -207,9 +215,15 @@ mod tests {
         async fn post(
             &self,
             _url: &str,
-            _headers: &[(&str, &str)],
+            headers: &[(&str, &str)],
             _body: &[u8],
         ) -> Result<Vec<u8>, AgentError> {
+            self.captured_headers.borrow_mut().push(
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            );
             self.responses
                 .borrow_mut()
                 .pop_front()
@@ -223,6 +237,7 @@ mod tests {
         let client = McpClient::new(
             MockHttpBackend::new(vec![response]),
             "http://localhost:8787".to_string(),
+            vec![],
         );
         let caps = client.initialize().await.unwrap();
         assert!(caps.tools.is_some());
@@ -234,6 +249,7 @@ mod tests {
         let client = McpClient::new(
             MockHttpBackend::new(vec![response]),
             "http://localhost:8787".to_string(),
+            vec![],
         );
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
@@ -247,6 +263,7 @@ mod tests {
         let client = McpClient::new(
             MockHttpBackend::new(vec![response]),
             "http://localhost:8787".to_string(),
+            vec![],
         );
         let result = client
             .call_tool("web_search", serde_json::json!({"query": "test"}))
@@ -263,11 +280,35 @@ mod tests {
         let client = McpClient::new(
             MockHttpBackend::new(vec![response]),
             "http://localhost:8787".to_string(),
+            vec![],
         );
         let err = client.list_tools().await.unwrap_err();
         match err {
             AgentError::McpError(msg) => assert!(msg.contains("Invalid Request")),
             other => panic!("Expected McpError, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_extra_headers_forwarded() {
+        let response = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+        let backend = MockHttpBackend::new(vec![response]);
+        let captured = backend.captured_headers.clone();
+        let client = McpClient {
+            backend,
+            server_url: "http://localhost:8787".to_string(),
+            next_id: std::cell::Cell::new(1),
+            extra_headers: vec![(
+                "authorization".to_string(),
+                "Bearer sk-test-123".to_string(),
+            )],
+        };
+        client.list_tools().await.unwrap();
+        let headers = captured.borrow();
+        assert_eq!(headers.len(), 1);
+        let req_headers = &headers[0];
+        assert!(req_headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer sk-test-123"));
     }
 }

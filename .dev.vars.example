@@ -1,6 +1,10 @@
 # Required: Anthropic API key for the agent's LLM calls
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 
+# Required: AES-256-GCM key for encrypting per-skill auth credentials in SQLite.
+# Generate with: openssl rand -base64 32
+SKILL_ENCRYPTION_KEY=your-encryption-key-here
+
 # Optional: Override the default model (default: claude-sonnet-4-20250514)
 # CLAUDE_MODEL=claude-sonnet-4-20250514
 
