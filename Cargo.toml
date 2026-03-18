@@ -9,4 +9,5 @@ members = [
     "skills/skill-memory",
     "skills/skill-web-search",
     "skills/skill-http-fetch",
+    "skills/skill-schedule",
 ]

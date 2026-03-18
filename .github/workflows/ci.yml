@@ -53,6 +53,9 @@ jobs:
       - name: Check skill-http-fetch (wasm32)
         run: cargo check -p skill-http-fetch --target wasm32-unknown-unknown
 
+      - name: Check skill-schedule (wasm32)
+        run: cargo check -p skill-schedule --target wasm32-unknown-unknown
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -110,6 +113,9 @@ jobs:
 
       - name: Clippy skill-http-fetch (wasm32)
         run: cargo clippy -p skill-http-fetch --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Clippy skill-schedule (wasm32)
+        run: cargo clippy -p skill-schedule --target wasm32-unknown-unknown -- -D warnings
 
   integration:
     name: Integration Tests

@@ -33,3 +33,7 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 # [[services]]
 # binding = "SKILL_MEMORY"
 # service = "skill-memory"
+#
+# [[services]]
+# binding = "SKILL_SCHEDULE"
+# service = "skill-schedule"

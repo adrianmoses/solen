@@ -578,13 +578,23 @@ impl AgentDo {
 
     /// Shared agent turn logic used by both HTTP and WebSocket handlers.
     /// Now includes skill-based tool execution loop with human-in-the-loop.
-    async fn run_agent_turn(&self, user_message: &str) -> Result<serde_json::Value> {
+    /// Optional `system_hint` is appended to the system prompt for this turn only
+    /// (used by scheduled task callbacks to nudge the agent toward a specific tool).
+    async fn run_agent_turn(
+        &self,
+        user_message: &str,
+        system_hint: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let config = self.build_llm_config();
         let llm = LlmClient::new(config, WorkerFetchBackend);
         let agent = Agent::new(llm);
 
         let messages = self.load_messages(50);
-        let system_prompt = self.load_system_prompt();
+        let mut system_prompt = self.load_system_prompt();
+        if let Some(hint) = system_hint {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(hint);
+        }
 
         let registry = self
             .build_registry()
@@ -679,10 +689,25 @@ impl AgentDo {
         #[derive(Deserialize)]
         struct MessageRequest {
             message: String,
+            #[serde(default)]
+            tool_params: Option<serde_json::Value>,
         }
 
         let body: MessageRequest = req.json().await?;
-        let response_body = self.run_agent_turn(&body.message).await?;
+
+        // Build system hint from tool_params if present (used by scheduled task callbacks)
+        let system_hint = body.tool_params.as_ref().and_then(|tp| {
+            let tool_name = tp.get("tool_name")?.as_str()?;
+            let tool_input = tp.get("tool_input")?;
+            Some(format!(
+                "SCHEDULED TASK: You should use the tool '{}' with the following input: {}",
+                tool_name, tool_input
+            ))
+        });
+
+        let response_body = self
+            .run_agent_turn(&body.message, system_hint.as_deref())
+            .await?;
         Response::from_json(&response_body)
     }
 
@@ -695,6 +720,41 @@ impl AgentDo {
         let pair = WebSocketPair::new()?;
         self.state.accept_web_socket(&pair.server);
         Response::from_websocket(pair.client)
+    }
+
+    // --- Schedule proxy handlers ---
+
+    async fn handle_schedule_proxy(&self, req: Request, user_id: &str) -> Result<Response> {
+        let skill_schedule = self.env.service("SKILL_SCHEDULE").map_err(|e| {
+            Error::RustError(format!(
+                "SKILL_SCHEDULE service binding not available: {e:?}"
+            ))
+        })?;
+
+        // Clone the request with X-User-Id header added
+        let path = req.path();
+        let method = req.method();
+
+        let mut init = RequestInit::new();
+        init.method = method;
+        init.headers
+            .set("content-type", "application/json")
+            .map_err(|e| Error::RustError(format!("{e:?}")))?;
+        init.headers
+            .set("X-User-Id", user_id)
+            .map_err(|e| Error::RustError(format!("{e:?}")))?;
+
+        // Forward body for POST requests
+        if req.method() == Method::Post {
+            let mut req = req;
+            let body_text = req.text().await?;
+            init.body = Some(wasm_bindgen::JsValue::from_str(&body_text));
+        }
+
+        let proxy_req = Request::new_with_init(&format!("https://fake-host{path}"), &init)?;
+
+        let http_resp = skill_schedule.fetch_request(proxy_req).await?;
+        Response::try_from(http_resp)
     }
 
     // --- Skill management handlers ---
@@ -836,6 +896,23 @@ impl DurableObject for AgentDo {
         let path = req.path();
         let method = req.method();
 
+        // Extract user_id for schedule proxy (before match consumes req)
+        let user_id = req
+            .headers()
+            .get("X-User-Id")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        // Schedule proxy routes
+        let is_schedule_route = (method == Method::Post || method == Method::Get)
+            && path.as_str() == "/schedules"
+            || method == Method::Delete && path.starts_with("/schedules/");
+
+        if is_schedule_route {
+            return self.handle_schedule_proxy(req, &user_id).await;
+        }
+
         match (method, path.as_str()) {
             (Method::Post, "/message") => self.handle_message(req).await,
             (Method::Get, "/history") => self.handle_history(),
@@ -907,7 +984,7 @@ impl DurableObject for AgentDo {
             }
         };
 
-        match self.run_agent_turn(&parsed.message).await {
+        match self.run_agent_turn(&parsed.message, None).await {
             Ok(result) => {
                 // If awaiting approval, send approval_required event
                 if result.get("status").and_then(|v| v.as_str()) == Some("awaiting_approval") {

@@ -1,0 +1,19 @@
+name = "skill-schedule"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-01-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[[durable_objects.bindings]]
+name = "SCHEDULE_DO"
+class_name = "ScheduleDo"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ScheduleDo"]
+
+# Service binding back to edgeclaw for alarm callbacks
+[[services]]
+binding = "EDGECLAW"
+service = "edgeclaw"
