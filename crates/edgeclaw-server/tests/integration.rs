@@ -7,6 +7,7 @@ use http_body_util::BodyExt;
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceExt;
 
+use edgeclaw_server::scheduler::Scheduler;
 use edgeclaw_server::server::{build_router, AppState, ServerConfig};
 
 // --- Test helpers ---
@@ -19,6 +20,7 @@ fn test_config(mock_api_url: &str) -> ServerConfig {
         anthropic_api_key: Some("test-key".to_string()),
         default_model: Some("test-model".to_string()),
         anthropic_base_url: mock_api_url.to_string(),
+        max_tasks_per_user: 20,
     }
 }
 
@@ -158,8 +160,54 @@ fn get(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn delete_req(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn test_app_with_state(mock_api_url: &str) -> (AppState, axum::Router) {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("failed to create in-memory pool");
+
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .expect("failed to run migrations");
+
+    let config = Arc::new(test_config(mock_api_url));
+    let state = AppState {
+        db: pool,
+        config: config.clone(),
+    };
+    let router = build_router(state.clone());
+    (state, router)
+}
+
 const END_TURN: &str = include_str!("../../../tests/fixtures/end_turn_response.json");
 const TOOL_USE: &str = include_str!("../../../tests/fixtures/tool_use_response.json");
+
+/// Wait for a spawned task to set last_run (up to 5s).
+async fn wait_for_last_run(pool: &sqlx::SqlitePool, task_id: i64) -> i64 {
+    for _ in 0..50 {
+        let (last_run,): (Option<i64>,) =
+            sqlx::query_as("SELECT last_run FROM scheduled_tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        if let Some(ts) = last_run {
+            return ts;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("last_run was not set within timeout for task {task_id}");
+}
 
 // --- Tests ---
 
@@ -398,4 +446,215 @@ async fn test_multi_turn_conversation() {
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[2]["role"], "user");
     assert_eq!(messages[3]["role"], "assistant");
+}
+
+// --- Scheduled task tests ---
+
+#[tokio::test]
+async fn test_schedule_one_shot_task() {
+    let mock_url = mock_anthropic_server(vec![END_TURN]).await;
+    let (state, app) = test_app_with_state(&mock_url).await;
+
+    // Create a one-shot task
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/tasks/schedule",
+            serde_json::json!({
+                "user_id": "test:sched",
+                "name": "one-shot-test",
+                "run_at": 1000,
+                "payload": { "message": "Hello from scheduled task" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["name"], "one-shot-test");
+    assert_eq!(body["next_run_at"], 1000);
+    let task_id = body["id"].as_i64().unwrap();
+
+    // Verify it appears in GET /tasks
+    let resp = app
+        .clone()
+        .oneshot(get("/tasks?user_id=test:sched"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    let tasks = body.as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["name"], "one-shot-test");
+
+    // run_at is in the past (1000ms epoch), so poll_once should fire it
+    let scheduler = Scheduler::new(state.db.clone(), state.config.clone());
+    scheduler.poll_once().await.unwrap();
+
+    // After poll_once, the task is disabled immediately (before spawn)
+    let resp = app.oneshot(get("/tasks?user_id=test:sched")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    let tasks = body.as_array().unwrap();
+    assert!(
+        tasks.is_empty(),
+        "one-shot task should be disabled after execution"
+    );
+
+    // Wait for the spawned task to finish and set last_run
+    let last_run = wait_for_last_run(&state.db, task_id).await;
+    assert!(last_run > 0, "last_run should be set after execution");
+}
+
+#[tokio::test]
+async fn test_schedule_cron_task_rearms() {
+    // Mock returns END_TURN for each agent turn triggered by the scheduler
+    let mock_url = mock_anthropic_server(vec![END_TURN, END_TURN, END_TURN]).await;
+    let (state, app) = test_app_with_state(&mock_url).await;
+
+    // Ensure user exists
+    edgeclaw_server::agent::ensure_user(&state.db, "test:cron")
+        .await
+        .unwrap();
+
+    // Insert a cron task directly with run_at in the past so it fires immediately.
+    // "* * * * * * *" = every second (7-field cron with seconds).
+    sqlx::query(
+        "INSERT INTO scheduled_tasks (user_id, name, cron, run_at, payload) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind("test:cron")
+    .bind("cron-test")
+    .bind("* * * * * * *")
+    .bind(1000_i64) // far in the past
+    .bind(r#"{"message":"cron tick"}"#)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Get task id for wait helper
+    let (task_id,): (i64,) =
+        sqlx::query_as("SELECT id FROM scheduled_tasks WHERE name = 'cron-test'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+
+    let scheduler = Scheduler::new(state.db.clone(), state.config.clone());
+
+    // First poll: re-arms run_at synchronously, spawns execution
+    scheduler.poll_once().await.unwrap();
+
+    // run_at is re-armed immediately (before spawn)
+    let (run_at_1,): (Option<i64>,) =
+        sqlx::query_as("SELECT run_at FROM scheduled_tasks WHERE name = 'cron-test'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    let run_at_1 = run_at_1.unwrap();
+    assert!(
+        run_at_1 > 1000,
+        "run_at should advance past the original value"
+    );
+
+    // Wait for spawned task to set last_run
+    let last_run_1 = wait_for_last_run(&state.db, task_id).await;
+
+    // Set run_at back to the past so we can fire again without waiting.
+    // Also clear last_run so we can detect the second write.
+    sqlx::query(
+        "UPDATE scheduled_tasks SET run_at = 1000, last_run = NULL WHERE name = 'cron-test'",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Second poll: fires again and re-arms
+    scheduler.poll_once().await.unwrap();
+
+    let (run_at_2,): (Option<i64>,) =
+        sqlx::query_as("SELECT run_at FROM scheduled_tasks WHERE name = 'cron-test'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(
+        run_at_2.unwrap() > 1000,
+        "run_at should re-arm after second fire"
+    );
+
+    // Wait for second execution
+    let last_run_2 = wait_for_last_run(&state.db, task_id).await;
+    assert!(last_run_2 >= last_run_1, "last_run should advance");
+
+    // Task should still be enabled (it's recurring)
+    let resp = app.oneshot(get("/tasks?user_id=test:cron")).await.unwrap();
+    let body = json_body(resp).await;
+    let tasks = body.as_array().unwrap();
+    assert_eq!(tasks.len(), 1, "cron task should still be enabled");
+}
+
+#[tokio::test]
+async fn test_schedule_invalid_cron_rejected() {
+    let app = test_app("http://unused").await;
+
+    let resp = app
+        .oneshot(post_json(
+            "/tasks/schedule",
+            serde_json::json!({
+                "user_id": "test:bad-cron",
+                "name": "bad-cron",
+                "cron": "not a valid cron",
+                "payload": { "message": "nope" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(resp).await;
+    assert!(body["error"].as_str().unwrap().contains("invalid cron"));
+}
+
+#[tokio::test]
+async fn test_list_and_delete_tasks() {
+    let app = test_app("http://unused").await;
+
+    // Create a one-shot task
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/tasks/schedule",
+            serde_json::json!({
+                "user_id": "test:del",
+                "name": "deletable",
+                "run_at": 9999999999999_i64,
+                "payload": { "message": "will be deleted" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    let task_id = body["id"].as_i64().unwrap();
+
+    // List — should see it
+    let resp = app
+        .clone()
+        .oneshot(get("/tasks?user_id=test:del"))
+        .await
+        .unwrap();
+    let body = json_body(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    // Delete
+    let resp = app
+        .clone()
+        .oneshot(delete_req(&format!("/tasks/{task_id}?user_id=test:del")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["deleted"], true);
+
+    // List — should be empty
+    let resp = app.oneshot(get("/tasks?user_id=test:del")).await.unwrap();
+    let body = json_body(resp).await;
+    assert!(body.as_array().unwrap().is_empty());
 }

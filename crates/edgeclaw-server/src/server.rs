@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -16,6 +16,7 @@ pub struct ServerConfig {
     pub anthropic_api_key: Option<String>,
     pub default_model: Option<String>,
     pub anthropic_base_url: String,
+    pub max_tasks_per_user: i64,
 }
 
 impl ServerConfig {
@@ -32,6 +33,10 @@ impl ServerConfig {
             default_model: std::env::var("CLAUDE_MODEL").ok(),
             anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
+            max_tasks_per_user: std::env::var("MAX_TASKS_PER_USER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
         }
     }
 
@@ -64,5 +69,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/skills", get(handlers::list_skills_handler))
         .route("/approve", post(handlers::approve_handler))
         .route("/approvals", get(handlers::list_approvals_handler))
+        .route("/tasks/schedule", post(handlers::schedule_task_handler))
+        .route("/tasks", get(handlers::list_tasks_handler))
+        .route("/tasks/{id}", delete(handlers::delete_task_handler))
         .with_state(state)
 }
