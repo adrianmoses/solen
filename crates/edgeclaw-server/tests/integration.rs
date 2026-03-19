@@ -92,35 +92,37 @@ async fn mock_skill_server() -> String {
 
     let app = Router::new().route(
         "/mcp",
-        post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
-            let id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
-            let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        post(
+            |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                let id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
+                let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
-            let result = match method {
-                "initialize" => serde_json::json!({
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "test-skill", "version": "0.1.0" }
-                }),
-                "tools/list" => serde_json::json!({
-                    "tools": [{
-                        "name": "greet",
-                        "description": "Returns a greeting",
-                        "inputSchema": { "type": "object", "properties": {} }
-                    }]
-                }),
-                "tools/call" => serde_json::json!({
-                    "content": [{ "type": "text", "text": "Hello from skill!" }],
-                    "isError": false
-                }),
-                _ => serde_json::json!(null),
-            };
+                let result = match method {
+                    "initialize" => serde_json::json!({
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "test-skill", "version": "0.1.0" }
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{
+                            "name": "greet",
+                            "description": "Returns a greeting",
+                            "inputSchema": { "type": "object", "properties": {} }
+                        }]
+                    }),
+                    "tools/call" => serde_json::json!({
+                        "content": [{ "type": "text", "text": "Hello from skill!" }],
+                        "isError": false
+                    }),
+                    _ => serde_json::json!(null),
+                };
 
-            axum::Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result
-            }))
-        }),
+                axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }))
+            },
+        ),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -244,10 +246,7 @@ async fn test_history_empty_for_unknown_user() {
 async fn test_skills_empty_for_new_user() {
     let app = test_app("http://unused").await;
 
-    let resp = app
-        .oneshot(get("/skills?user_id=test:1"))
-        .await
-        .unwrap();
+    let resp = app.oneshot(get("/skills?user_id=test:1")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = json_body(resp).await;
@@ -298,10 +297,7 @@ async fn test_add_skill_and_list() {
 async fn test_approvals_empty() {
     let app = test_app("http://unused").await;
 
-    let resp = app
-        .oneshot(get("/approvals?user_id=test:1"))
-        .await
-        .unwrap();
+    let resp = app.oneshot(get("/approvals?user_id=test:1")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = json_body(resp).await;
