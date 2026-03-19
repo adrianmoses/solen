@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 use crate::error::AgentError;
 use crate::types::{ContentBlock, Message, ToolDefinition};
 
+#[cfg(feature = "native")]
+#[async_trait]
+pub trait HttpBackend: Send + Sync {
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Vec<u8>, AgentError>;
+}
+
+#[cfg(not(feature = "native"))]
 #[async_trait(?Send)]
 pub trait HttpBackend {
     async fn post(
@@ -166,25 +178,72 @@ impl<H: HttpBackend> LlmClient<H> {
     }
 }
 
+#[cfg(feature = "native")]
+pub struct ReqwestBackend {
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "native")]
+impl ReqwestBackend {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[cfg(feature = "native")]
+impl Default for ReqwestBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "native")]
+#[async_trait]
+impl HttpBackend for ReqwestBackend {
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Vec<u8>, AgentError> {
+        let mut builder = self.client.post(url).body(body.to_vec());
+        for (key, value) in headers {
+            builder = builder.header(*key, *value);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| AgentError::Http(e.to_string()))?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| AgentError::Http(e.to_string()))?;
+        Ok(bytes.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::AgentError;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     struct MockBackend {
-        response: RefCell<Option<Vec<u8>>>,
+        response: Mutex<Option<Vec<u8>>>,
     }
 
     impl MockBackend {
         fn new(response: &str) -> Self {
             Self {
-                response: RefCell::new(Some(response.as_bytes().to_vec())),
+                response: Mutex::new(Some(response.as_bytes().to_vec())),
             }
         }
     }
 
-    #[async_trait(?Send)]
+    #[cfg_attr(feature = "native", async_trait)]
+    #[cfg_attr(not(feature = "native"), async_trait(?Send))]
     impl HttpBackend for MockBackend {
         async fn post(
             &self,
@@ -193,7 +252,8 @@ mod tests {
             _body: &[u8],
         ) -> Result<Vec<u8>, AgentError> {
             self.response
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .take()
                 .ok_or_else(|| AgentError::Http("No response".to_string()))
         }

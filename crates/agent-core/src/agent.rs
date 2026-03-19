@@ -194,22 +194,23 @@ mod tests {
     use super::*;
     use crate::llm::{HttpBackend, LlmClient, LlmConfig};
     use async_trait::async_trait;
-    use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     struct MockHttpBackend {
-        responses: RefCell<VecDeque<Vec<u8>>>,
+        responses: Mutex<VecDeque<Vec<u8>>>,
     }
 
     impl MockHttpBackend {
         fn new(responses: Vec<Vec<u8>>) -> Self {
             Self {
-                responses: RefCell::new(responses.into()),
+                responses: Mutex::new(responses.into()),
             }
         }
     }
 
-    #[async_trait(?Send)]
+    #[cfg_attr(feature = "native", async_trait)]
+    #[cfg_attr(not(feature = "native"), async_trait(?Send))]
     impl HttpBackend for MockHttpBackend {
         async fn post(
             &self,
@@ -218,7 +219,8 @@ mod tests {
             _body: &[u8],
         ) -> Result<Vec<u8>, AgentError> {
             self.responses
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .pop_front()
                 .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
         }

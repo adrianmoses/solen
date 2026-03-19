@@ -3,6 +3,9 @@ name = "skill-registry"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+native = ["agent-core/native", "mcp-client/native"]
+
 [dependencies]
 agent-core = { path = "../agent-core" }
 mcp-client = { path = "../mcp-client" }

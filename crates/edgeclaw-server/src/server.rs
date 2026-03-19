@@ -1,16 +1,21 @@
 use std::sync::Arc;
 
-use axum::{routing::get, Json, Router};
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-#[allow(dead_code)]
+use crate::handlers;
+
 pub struct ServerConfig {
     pub database_url: String,
     pub host: String,
     pub port: u16,
     pub anthropic_api_key: Option<String>,
     pub default_model: Option<String>,
+    pub anthropic_base_url: String,
 }
 
 impl ServerConfig {
@@ -25,6 +30,8 @@ impl ServerConfig {
                 .unwrap_or(8080),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             default_model: std::env::var("CLAUDE_MODEL").ok(),
+            anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
         }
     }
 
@@ -33,15 +40,10 @@ impl ServerConfig {
     }
 }
 
-/// Placeholder for the scheduler (M5.4)
-pub struct Scheduler;
-
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct AppState {
     pub db: SqlitePool,
     pub config: Arc<ServerConfig>,
-    pub scheduler: Arc<Scheduler>,
 }
 
 #[derive(Serialize)]
@@ -56,5 +58,11 @@ async fn health_handler() -> Json<HealthResponse> {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/message", post(handlers::message_handler))
+        .route("/history", get(handlers::history_handler))
+        .route("/skills/add", post(handlers::add_skill_handler))
+        .route("/skills", get(handlers::list_skills_handler))
+        .route("/approve", post(handlers::approve_handler))
+        .route("/approvals", get(handlers::list_approvals_handler))
         .with_state(state)
 }

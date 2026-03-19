@@ -3,6 +3,10 @@ name = "edgeclaw-server"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "edgeclaw_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "edgeclaw-server"
 path = "src/main.rs"
@@ -18,3 +22,15 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+agent-core = { path = "../agent-core", features = ["native"] }
+mcp-client = { path = "../mcp-client", features = ["native"] }
+skill-registry = { path = "../skill-registry", features = ["native"] }
+reqwest = { version = "0.12", features = ["json"] }
+chrono = "0.4"
+cron = "0.15"
+async-trait = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+hyper = "1"

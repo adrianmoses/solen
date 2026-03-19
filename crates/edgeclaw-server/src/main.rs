@@ -1,5 +1,3 @@
-mod server;
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,7 +5,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use server::{build_router, AppState, Scheduler, ServerConfig};
+use edgeclaw_server::scheduler::Scheduler;
+use edgeclaw_server::server::{build_router, AppState, ServerConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,11 +26,13 @@ async fn main() -> Result<()> {
 
     sqlx::migrate!().run(&pool).await?;
 
-    let state = AppState {
-        db: pool,
-        config: Arc::new(config),
-        scheduler: Arc::new(Scheduler),
-    };
+    let config = Arc::new(config);
+
+    // Start background scheduler
+    let sched = Scheduler::new(pool.clone(), config.clone());
+    sched.start();
+
+    let state = AppState { db: pool, config };
 
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;

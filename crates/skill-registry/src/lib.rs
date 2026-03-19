@@ -153,6 +153,15 @@ impl<H: HttpBackend> SkillRegistry<H> {
     }
 }
 
+#[cfg(feature = "native")]
+#[async_trait]
+impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
+    async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
+        self.dispatch(tool_call).await
+    }
+}
+
+#[cfg(not(feature = "native"))]
 #[async_trait(?Send)]
 impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
@@ -165,25 +174,24 @@ mod tests {
     use super::*;
     use agent_core::HttpBackend;
     use async_trait::async_trait;
-    use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     struct MockHttpBackend {
-        responses: RefCell<VecDeque<Vec<u8>>>,
-        captured_headers: Rc<RefCell<Vec<Vec<(String, String)>>>>,
+        responses: Mutex<VecDeque<Vec<u8>>>,
+        captured_headers: Arc<Mutex<Vec<Vec<(String, String)>>>>,
     }
 
     impl MockHttpBackend {
         fn new(responses: Vec<&str>) -> Self {
             Self {
-                responses: RefCell::new(
+                responses: Mutex::new(
                     responses
                         .into_iter()
                         .map(|s| s.as_bytes().to_vec())
                         .collect(),
                 ),
-                captured_headers: Rc::new(RefCell::new(Vec::new())),
+                captured_headers: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -192,7 +200,8 @@ mod tests {
         }
     }
 
-    #[async_trait(?Send)]
+    #[cfg_attr(feature = "native", async_trait)]
+    #[cfg_attr(not(feature = "native"), async_trait(?Send))]
     impl HttpBackend for MockHttpBackend {
         async fn post(
             &self,
@@ -200,14 +209,15 @@ mod tests {
             headers: &[(&str, &str)],
             _body: &[u8],
         ) -> Result<Vec<u8>, AgentError> {
-            self.captured_headers.borrow_mut().push(
+            self.captured_headers.lock().unwrap().push(
                 headers
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             );
             self.responses
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .pop_front()
                 .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
         }
@@ -389,7 +399,7 @@ mod tests {
             auth_header_value: Some("secret-key-123".to_string()),
         }];
 
-        let captured = Rc::new(RefCell::new(Vec::<Vec<(String, String)>>::new()));
+        let captured = Arc::new(Mutex::new(Vec::<Vec<(String, String)>>::new()));
         let captured_for_factory = captured.clone();
 
         let registry = SkillRegistry::from_rows(rows, move || {
@@ -397,7 +407,7 @@ mod tests {
                 .into_iter()
                 .collect();
             MockHttpBackend {
-                responses: RefCell::new(responses),
+                responses: Mutex::new(responses),
                 captured_headers: captured_for_factory.clone(),
             }
         })
@@ -412,7 +422,7 @@ mod tests {
         let result = registry.dispatch(&tool_call).await.unwrap();
         assert_eq!(result.content, "ok");
 
-        let headers = captured.borrow();
+        let headers = captured.lock().unwrap();
         assert_eq!(headers.len(), 1);
         assert!(headers[0]
             .iter()

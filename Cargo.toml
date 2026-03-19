@@ -4,11 +4,14 @@ members = [
     "crates/agent-core",
     "crates/mcp-client",
     "crates/skill-registry",
-    "crates/edgeclaw-worker",
+    "crates/edgeclaw-server",
     "skills/mcp-server-util",
     "skills/skill-memory",
     "skills/skill-web-search",
     "skills/skill-http-fetch",
     "skills/skill-schedule",
-    "crates/edgeclaw-server",
 ]
+# edgeclaw-worker is wasm32-only and conflicts with native feature unification
+# from edgeclaw-server. It is being removed as part of the VPS migration.
+# Check it separately: cargo check -p edgeclaw-worker --target wasm32-unknown-unknown
+exclude = ["crates/edgeclaw-worker"]

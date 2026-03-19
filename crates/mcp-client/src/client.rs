@@ -7,7 +7,7 @@ use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 pub struct McpClient<H: HttpBackend> {
     backend: H,
     server_url: String,
-    next_id: std::cell::Cell<u64>,
+    next_id: std::sync::atomic::AtomicU64,
     extra_headers: Vec<(String, String)>,
 }
 
@@ -58,15 +58,14 @@ impl<H: HttpBackend> McpClient<H> {
         Self {
             backend,
             server_url,
-            next_id: std::cell::Cell::new(1),
+            next_id: std::sync::atomic::AtomicU64::new(1),
             extra_headers,
         }
     }
 
     fn next_id(&self) -> u64 {
-        let id = self.next_id.get();
-        self.next_id.set(id + 1);
-        id
+        self.next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn send_request(
@@ -171,6 +170,19 @@ impl<H: HttpBackend> McpClient<H> {
 /// Convenience: allow `&McpClient` to act as a `ToolExecutor` when tool names
 /// are already resolved (no namespacing). The SkillRegistry layer handles
 /// namespacing and delegates to this.
+#[cfg(feature = "native")]
+#[async_trait]
+impl<H: HttpBackend> agent_core::ToolExecutor for McpClient<H> {
+    async fn execute(&self, tool_call: &agent_core::ToolCall) -> Result<ToolResult, AgentError> {
+        let mut result = self
+            .call_tool(&tool_call.name, tool_call.input.clone())
+            .await?;
+        result.tool_use_id = tool_call.id.clone();
+        Ok(result)
+    }
+}
+
+#[cfg(not(feature = "native"))]
 #[async_trait(?Send)]
 impl<H: HttpBackend> agent_core::ToolExecutor for McpClient<H> {
     async fn execute(&self, tool_call: &agent_core::ToolCall) -> Result<ToolResult, AgentError> {
@@ -187,30 +199,30 @@ mod tests {
     use super::*;
     use agent_core::HttpBackend;
     use async_trait::async_trait;
-    use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     struct MockHttpBackend {
-        responses: RefCell<VecDeque<Vec<u8>>>,
-        captured_headers: Rc<RefCell<Vec<Vec<(String, String)>>>>,
+        responses: Mutex<VecDeque<Vec<u8>>>,
+        captured_headers: Arc<Mutex<Vec<Vec<(String, String)>>>>,
     }
 
     impl MockHttpBackend {
         fn new(responses: Vec<&str>) -> Self {
             Self {
-                responses: RefCell::new(
+                responses: Mutex::new(
                     responses
                         .into_iter()
                         .map(|s| s.as_bytes().to_vec())
                         .collect(),
                 ),
-                captured_headers: Rc::new(RefCell::new(Vec::new())),
+                captured_headers: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
-    #[async_trait(?Send)]
+    #[cfg_attr(feature = "native", async_trait)]
+    #[cfg_attr(not(feature = "native"), async_trait(?Send))]
     impl HttpBackend for MockHttpBackend {
         async fn post(
             &self,
@@ -218,14 +230,15 @@ mod tests {
             headers: &[(&str, &str)],
             _body: &[u8],
         ) -> Result<Vec<u8>, AgentError> {
-            self.captured_headers.borrow_mut().push(
+            self.captured_headers.lock().unwrap().push(
                 headers
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             );
             self.responses
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .pop_front()
                 .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
         }
@@ -297,14 +310,14 @@ mod tests {
         let client = McpClient {
             backend,
             server_url: "http://localhost:8787".to_string(),
-            next_id: std::cell::Cell::new(1),
+            next_id: std::sync::atomic::AtomicU64::new(1),
             extra_headers: vec![(
                 "authorization".to_string(),
                 "Bearer sk-test-123".to_string(),
             )],
         };
         client.list_tools().await.unwrap();
-        let headers = captured.borrow();
+        let headers = captured.lock().unwrap();
         assert_eq!(headers.len(), 1);
         let req_headers = &headers[0];
         assert!(req_headers

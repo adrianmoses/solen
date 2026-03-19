@@ -64,6 +64,13 @@ pub struct AgentContext {
     pub tools: Vec<ToolDefinition>,
 }
 
+#[cfg(feature = "native")]
+#[async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
+}
+
+#[cfg(not(feature = "native"))]
 #[async_trait(?Send)]
 pub trait ToolExecutor {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
