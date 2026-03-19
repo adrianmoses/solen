@@ -1,553 +1,771 @@
-# EdgeClaw — Prototype Specification
+# EdgeClaw — Architecture Specification
 
-> A stateful, edge-native, WASM-isolated personal AI agent with MCP-native skill routing.
-
----
-
-## Overview
-
-EdgeClaw is a personal AI agent runtime built on three core principles derived from the lessons of OpenClaw and NanoClaw:
-
-1. **Isolation by architecture, not policy** — WASM sandboxing is stronger than container-level security because there is no syscall surface and no kernel exposure. A compromised skill cannot touch the host or any other skill.
-2. **Identity-first statefulness** — each agent instance is a Durable Object with a globally-unique identity, its own embedded SQLite database, and strongly consistent storage colocated with compute. The agent *is* the state — there is no "load from external store on every request" round-trip.
-3. **Skills as first-class citizens** — tools are not hardcoded features. They are MCP-compatible modules discovered and invoked at runtime, each isolated from the others and from the agent core.
-
-The entire stack is written in Rust. The dispatcher Worker and `AgentDO` Durable Object are implemented using `workers-rs`, which compiles to WASM and provides idiomatic Rust bindings to all Cloudflare runtime APIs including Durable Objects, SQLite storage, `Fetch`, service bindings, and WebSockets — no JavaScript required.
+> A stateful, self-hosted personal AI agent runtime built on tokio + axum + sqlx,
+> deployed via Docker Compose on a Hetzner VPS.
+>
+> _This spec supersedes the original Cloudflare Workers/Durable Objects spec (archived at `docs/archive/EDGECLAW_SPEC_CF.md`).
+> Companion specs: [Credentials](EDGECLAW_CREDENTIALS_SPEC.md), [TUI](EDGECLAW_TUI_SPEC.md)._
 
 ---
 
-## Architecture Overview
+## What Changes, What Doesn't
 
-```
-                        ┌─────────────────────────────────────────┐
-  Telegram / HTTP  ───▶ │  Dispatcher Worker  (Rust / workers-rs) │
-                        │  stateless — routes by user ID          │
-                        └─────────────────┬───────────────────────┘
-                                          │  DO stub call
-                                          ▼
-                        ┌─────────────────────────────────────────┐
-                        │  AgentDO  (Rust Durable Object)         │
-                        │  identity: "agent:{user_id}"            │
-                        │                                         │
-                        │  SQLite tables:                         │
-                        │    messages, skills, prefs,             │
-                        │    pending_approvals                     │
-                        │                                         │
-                        │  Runs: ReAct loop (agent-core crate)    │
-                        │  Holds: WebSocket connections           │
-                        └──────────┬──────────────────────────────┘
-                                   │  MCP over HTTP / SSE
-                     ┌─────────────┼──────────────┐
-                     ▼             ▼              ▼
-              ┌────────────┐ ┌──────────┐ ┌────────────┐
-              │MemorySkill │ │WebSearch │ │ HttpFetch  │  ... user-added
-              │(Rust DO)   │ │(Rust     │ │(Rust       │      MCP servers
-              │            │ │ Worker)  │ │ Worker)    │
-              └────────────┘ └──────────┘ └────────────┘
-```
+The migration is entirely a runtime-layer swap. The domain logic is untouched.
 
-The central insight: **the Durable Object is the agent**. It is not a thin wrapper that loads and saves state around a stateless function — it is a persistent actor with its own SQLite database, identity, and lifecycle. State is never lost and never needs to be round-tripped through an external store on the hot path.
+| Crate | Status | Notes |
+|---|---|---|
+| `agent-core` | **Unchanged** | Pure Rust, no CF dependency |
+| `mcp-client` | **Unchanged** | Pure Rust HTTP client |
+| `skill-registry` | **Unchanged** | Pure Rust |
+| `credential-store` | **Unchanged** | `aes-gcm` + `ring`, no WASM constraints now |
+| `edgeclaw-worker` | **Deleted** | Was the workers-rs DO host — gone |
+| `edgeclaw-server` | **New** | tokio + axum + sqlx — replaces edgeclaw-worker |
+| `edgeclaw-cli` | **Minor changes** | `wrangler deploy` → SSH + Docker |
+| `skill-*` Workers | **Unchanged** | Still stateless HTTP servers, just deployed differently |
+
+The MCP skill architecture is protocol-level and survives intact. Skills remain isolated HTTP services. The credential encryption scheme (`aes-gcm` + HKDF via `ring`) is now unconstrained — use either freely.
 
 ---
 
-## Repository Structure
+## Repository Structure After Migration
 
 ```
 edgeclaw/
 ├── crates/
-│   ├── agent-core/          # Pure Rust ReAct loop and LLM client
-│   ├── mcp-client/          # Phase 2 — MCP protocol client
-│   ├── skill-registry/      # Phase 2 — skill discovery and dispatch
-│   └── edgeclaw-worker/     # workers-rs entrypoint: AgentDO + Dispatcher
+│   ├── agent-core/          # Unchanged
+│   ├── mcp-client/          # Unchanged
+│   ├── skill-registry/      # Unchanged
+│   ├── credential-store/    # Unchanged (ring now unrestricted)
+│   ├── edgeclaw-server/     # NEW — replaces edgeclaw-worker
+│   │   ├── src/
+│   │   │   ├── main.rs
+│   │   │   ├── server.rs        # axum router, AppState
+│   │   │   ├── agent.rs         # per-user agent task management
+│   │   │   ├── scheduler.rs     # tokio-based task scheduling
+│   │   │   ├── db.rs            # sqlx pool, migrations
+│   │   │   └── handlers/        # axum route handlers
+│   │   ├── migrations/          # sqlx migration files
+│   │   └── Cargo.toml
+│   └── edgeclaw-cli/        # Minor changes to deploy flow
 ├── skills/
-│   ├── skill-memory/        # Phase 2 — DO-backed memory MCP server (Rust)
-│   ├── skill-web-search/    # Phase 2 — stateless MCP Worker (Rust)
-│   └── skill-http-fetch/    # Phase 2 — stateless MCP Worker (Rust)
-├── tests/
-│   ├── integration/         # Miniflare-based end-to-end tests
-│   └── fixtures/            # Recorded LLM responses for deterministic tests
+│   ├── skill-memory/        # Now a tokio process, not a DO
+│   ├── skill-web-search/    # Unchanged logic, different deploy
+│   ├── skill-http-fetch/    # Unchanged logic, different deploy
+│   └── skill-gmail/         # etc.
+├── docker/
+│   ├── docker-compose.yml
+│   ├── docker-compose.dev.yml
+│   ├── Dockerfile.server
+│   └── Dockerfile.skill     # shared base for skill services
+├── deploy/
+│   └── edgeclaw.service     # systemd unit
 └── docs/
-    └── architecture.md
 ```
 
-All crates target `wasm32-unknown-unknown`. `workers-rs` (`worker` crate) provides the Cloudflare runtime bindings. `worker-build` handles the WASM compilation and shim generation required by `wrangler`.
-
 ---
 
-## workers-rs — Key Capabilities
+## Part 1 — `edgeclaw-server` (replaces `edgeclaw-worker`)
 
-`workers-rs` provides idiomatic Rust access to the full Cloudflare Workers platform:
+### 1.1 — Primitive Mapping
 
-- **`#[event(fetch)]`** — the dispatcher Worker entry point
-- **`#[durable_object]`** macro — marks a Rust struct as a Durable Object class; `worker-build` generates the required JS glue automatically
-- **`DurableObject` trait** — `fetch()` and alarm handler that the runtime calls into
-- **`State::storage()`** — access to the DO's Storage API, including `sql()` for the SQLite backend
-- **`SqlStorage::exec()`** — executes SQL against the DO's embedded SQLite database
-- **`ObjectNamespace::id_from_name()`** — derives a deterministic DO identity from a string; critical for routing the same user to the same DO instance every time
-- **`Stub::fetch()`** — sends an HTTP request to a remote DO instance
-- **`Env::durable_object()`**, **`Env::secret()`**, **`Env::service()`** — access to bindings declared in `wrangler.toml`
-- **`WebSocket` / `WebSocketPair`** — WebSocket hibernation support
+Every Cloudflare primitive has a direct, simpler equivalent:
 
-> **Known issue:** As of April 2025 there is an open memory leak bug in `workers-rs` (issue #722) affecting Durable Object eviction — memory allocated for a DO is not freed on eviction in the Rust/WASM path, whereas the JS path is unaffected. Track this issue before production use; it may be resolved by the time implementation begins.
+| Cloudflare (before) | VPS equivalent (after) |
+|---|---|
+| `DurableObject` per user | `AgentState` per user in SQLite |
+| `State::storage().sql()` | `sqlx::SqlitePool` |
+| `ObjectNamespace::id_from_name()` | User ID string as SQLite row key |
+| `Stub::fetch()` (DO-to-DO) | `reqwest` HTTP calls between services |
+| DO alarm | `tokio::time::sleep` + persisted task table |
+| `#[event(fetch)]` dispatcher | `axum::Router` |
+| Worker secret bindings | Environment variables from `.env` |
+| WebSocket hibernation | `tokio-tungstenite` persistent connection |
+| Cron Trigger | `tokio::time::interval` background task |
+| Workers KV | Not needed — SQLite covers it |
 
----
+### 1.2 — Application State
 
-## Phase 1 — Rust Agent Core with Durable Objects
+The `AppState` struct is shared across all axum handlers via `Arc`. It holds the database pool and a handle to the scheduler. No per-request state reconstruction needed — the pool is always open.
 
-### Goal
+```rust
+// crates/edgeclaw-server/src/server.rs
 
-A minimal, auditable agent loop running inside a Cloudflare Durable Object implemented entirely in Rust via `workers-rs`. The `AgentDO` owns all conversation state in its SQLite database. The `agent-core` crate contains the pure Rust ReAct logic with no runtime dependencies — it receives a fully-assembled `AgentContext` from the DO, runs the LLM loop, and returns results for the DO to persist and act on.
+pub struct AppState {
+    pub db: SqlitePool,
+    pub config: Arc<ServerConfig>,
+    pub scheduler: Arc<Scheduler>,
+}
 
-### Deliverables
+pub struct ServerConfig {
+    pub anthropic_api_key: String,
+    pub token_master_key: [u8; 32],   // decoded from env at startup
+    pub telegram_bot_token: Option<String>,
+    pub telegram_allowed_user_id: Option<i64>,
+    pub default_model: String,
+    pub max_iterations: u8,
+}
+```
 
-- `agent-core` crate compiles to `wasm32-unknown-unknown` with zero workers-rs dependency
-- `AgentDO` Durable Object in Rust with SQLite schema and conversation persistence
-- Dispatcher Worker in Rust routing by user ID via `id_from_name()`
-- ReAct loop making real Anthropic API calls via `worker::Fetch` from inside the DO
-- WebSocket support on `AgentDO` for streaming-ready connections
-- Local development and testing via Miniflare (full DO + SQLite emulation)
+`Arc<AppState>` is passed to all axum handlers via `.with_state()`. No `RwLock` needed — `SqlitePool` is already `Clone + Send + Sync`.
 
----
+### 1.3 — SQLite Schema
 
-### 1.1 — Crate Boundaries
+The schema is nearly identical to what was in the DO. The one addition is a `users` table — the DO used its identity as the user boundary; here it's an explicit row.
 
-The separation between `agent-core` and `edgeclaw-worker` is strict and intentional:
-
-**`agent-core`** — has zero dependency on `workers-rs` or any Cloudflare runtime crate. It defines the domain types (`Message`, `ContentBlock`, `ToolCall`, `ToolResult`, `ToolDefinition`, `AgentContext`), the LLM client trait and Anthropic implementation, and the ReAct loop. Its only async runtime requirement is a `HttpBackend` trait that the caller provides. This makes it independently testable with `reqwest` on native, and usable inside the DO via `worker::Fetch` on WASM.
-
-**`edgeclaw-worker`** — depends on both `agent-core` and `worker` (workers-rs). It implements `AgentDO`, the dispatcher `fetch` handler, the SQLite schema, and all platform glue. This is the only crate that touches Cloudflare APIs.
-
----
-
-### 1.2 — Domain Types (`agent-core`)
-
-The core types represent a conversation as an ordered sequence of messages, where each message carries one or more typed content blocks. This matches the Anthropic Messages API wire format directly, simplifying serialization.
-
-- **`Message`** — a single turn with `role` (user or assistant), a list of `ContentBlock`s, and a `created_at` timestamp for SQLite ordering.
-- **`ContentBlock`** — a tagged enum covering `Text`, `ToolUse` (LLM requesting a tool call), and `ToolResult` (the response from a tool execution).
-- **`AgentContext`** — the snapshot the DO assembles from SQLite before each run: conversation history, system prompt, and the list of available tool definitions.
-- **`ToolDefinition`** — name, description, and JSON Schema for the tool's input; passed verbatim to the LLM.
-- **`ToolCall`** — a parsed tool invocation from the LLM: id, name, and JSON input.
-- **`ToolResult`** — the result of executing a tool: the matching `tool_use_id`, a content string, and an `is_error` flag.
-- **`AgentRunResult`** — what the ReAct loop returns to the DO: newly generated messages to persist, an optional final answer string, and any pending tool calls that need execution.
-
----
-
-### 1.3 — LLM Client (`agent-core`)
-
-The LLM client is built around a `HttpBackend` trait with a single async `post` method. This decouples the client from any specific HTTP implementation:
-
-- **Native / test target** — `reqwest` backend, used for unit and integration tests
-- **WASM / DO target** — `worker::Fetch` backend, provided by `edgeclaw-worker`
-
-The client serialises the `AgentContext` into an Anthropic Messages API request (including the tool definitions array), POSTs it, and deserialises the response into an `LlmResponse` containing a `StopReason` and a list of `ContentBlock`s.
-
-The `base_url` field on `LlmConfig` is overridable for testing and for future Workers AI fallback routing.
-
----
-
-### 1.4 — ReAct Agent Loop (`agent-core`)
-
-The loop is a pure function — it takes an `AgentContext` and a user message, runs until the LLM either produces a final answer or requests tool calls, and returns an `AgentRunResult`. It never touches storage.
-
-The loop runs up to `max_iterations` times (default: 10, configurable). On each iteration:
-
-1. Call the LLM with the current context.
-2. If `stop_reason` is `end_turn` — extract the text answer, append the assistant message to the new-messages list, and return with `answer` set.
-3. If `stop_reason` is `tool_use` — extract the tool calls, append the assistant message to the new-messages list, and **return immediately** with `pending_tool_calls` set. The DO takes over from here: it persists the messages, executes the tools, and calls `agent.resume()` with the results.
-4. If `stop_reason` is `max_tokens` or `stop_sequence` — return an error.
-
-Returning to the DO at the tool-call boundary (rather than looping inline) is the key design decision. It allows the DO to persist intermediate state before any tool executes — meaning a DO eviction mid-run loses at most the current tool's execution, not the entire turn. It also makes human-in-the-loop approval straightforward: the DO can inspect `pending_tool_calls`, decide some require approval, persist them to the `pending_approvals` table, and respond to the user before ever executing them.
-
----
-
-### 1.5 — AgentDO (`edgeclaw-worker`)
-
-`AgentDO` is a Rust struct annotated with `#[durable_object]`. It holds a reference to the `State` provided by the runtime (which gives access to SQLite storage) and an `Env` for secrets and bindings.
-
-**SQLite schema** — initialised once on first access:
+Migrations live in `crates/edgeclaw-server/migrations/` as numbered `.sql` files. `sqlx::migrate!()` embeds and runs them at startup.
 
 ```sql
+-- migrations/0001_initial.sql
+
+CREATE TABLE IF NOT EXISTS users (
+    id          TEXT PRIMARY KEY,   -- e.g. "telegram:123456789"
+    created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    role       TEXT    NOT NULL,
-    content    TEXT    NOT NULL,  -- serde_json of Vec<ContentBlock>
-    created_at INTEGER NOT NULL
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL REFERENCES users(id),
+    role        TEXT    NOT NULL,   -- "user" | "assistant"
+    content     TEXT    NOT NULL,   -- JSON Vec<ContentBlock>
+    created_at  INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS skills (
-    name       TEXT PRIMARY KEY,
-    url        TEXT NOT NULL,
-    tools      TEXT NOT NULL,     -- serde_json of Vec<ToolDefinition>
-    added_at   INTEGER NOT NULL
+    user_id     TEXT    NOT NULL REFERENCES users(id),
+    name        TEXT    NOT NULL,
+    url         TEXT    NOT NULL,
+    tools       TEXT    NOT NULL,   -- JSON Vec<ToolDefinition>
+    added_at    INTEGER NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS credentials (
+    user_id           TEXT    NOT NULL REFERENCES users(id),
+    skill_name        TEXT    NOT NULL,
+    provider          TEXT    NOT NULL,
+    access_token_enc  BLOB    NOT NULL,
+    refresh_token_enc BLOB,
+    expires_at        INTEGER,
+    scopes            TEXT    NOT NULL,
+    user_salt         BLOB    NOT NULL,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    PRIMARY KEY (user_id, skill_name, provider)
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL REFERENCES users(id),
+    name        TEXT    NOT NULL,
+    cron        TEXT,               -- cron expression, nullable
+    run_at      INTEGER,            -- unix ms for one-shot tasks, nullable
+    payload     TEXT    NOT NULL,   -- JSON task params
+    last_run    INTEGER,
+    enabled     INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS pending_approvals (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    tool_call  TEXT    NOT NULL,  -- serde_json of ToolCall
-    created_at INTEGER NOT NULL
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL REFERENCES users(id),
+    tool_call   TEXT    NOT NULL,   -- JSON ToolCall
+    created_at  INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS prefs (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL
+    user_id     TEXT    NOT NULL REFERENCES users(id),
+    key         TEXT    NOT NULL,
+    value       TEXT    NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_user_created
+    ON messages(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_run_at
+    ON scheduled_tasks(run_at) WHERE run_at IS NOT NULL AND enabled = 1;
+```
+
+### 1.4 — Agent Turn Execution
+
+Where the DO had a `fetch()` handler that owned the turn loop, `edgeclaw-server` has an axum handler that calls into `agent-core`. The logic is identical — the only difference is where state comes from (SQLite via sqlx instead of DO storage).
+
+The turn function is a free async function, not a method on a DO. It takes the pool, the user ID, and the incoming message:
+
+```rust
+// crates/edgeclaw-server/src/agent.rs (prose description, not full code)
+```
+
+**Turn execution steps:**
+
+1. Upsert the user row (create if first message)
+2. Load conversation history — `SELECT ... WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`
+3. Load registered skills from the `skills` table, reconnect MCP clients
+4. Load system prompt from `prefs`
+5. Assemble `AgentContext` and call `agent_core::Agent::run(ctx, message)`
+6. Persist `new_messages` in a single `INSERT` transaction
+7. If `pending_tool_calls` — check for destructive calls, dispatch or pause
+8. Re-execute from step 2 using `agent_core::Agent::resume()` until `answer` is set
+9. Return the final answer string
+
+Critically, steps 6 and 7 happen inside a **sqlx transaction** — if the process crashes mid-turn, the partially completed turn is rolled back. On restart the user's last message is unanswered but no corrupted half-state exists in the DB.
+
+### 1.5 — Scheduler (replaces DO Alarms)
+
+The DO alarm API provided per-instance timers that survived eviction. On the VPS, this is a background tokio task that polls the `scheduled_tasks` table on startup and wakes tasks at their scheduled time.
+
+```rust
+// crates/edgeclaw-server/src/scheduler.rs (prose description)
+```
+
+**Scheduler design:**
+
+- On startup, spawns a `tokio::task` that runs a polling loop
+- Every 10 seconds, queries `scheduled_tasks` for tasks where `run_at <= now() AND enabled = 1`
+- For cron tasks, uses the `cron` crate to compute the next `run_at` after each execution and updates the row
+- For one-shot tasks, sets `enabled = 0` after execution
+- Each task execution calls back into the agent turn loop with a system-generated message (e.g. `"[SCHEDULED] Run morning briefing"`)
+- Tasks persist across restarts — they're in SQLite, not in memory
+
+This handles the use cases that broke on Cloudflare: "send me a daily briefing at 8am", "check for new GitHub PRs every 30 minutes". The tokio process is always running; there is no eviction.
+
+### 1.6 — axum Router
+
+```
+POST /message               — inbound message from Telegram or direct HTTP client
+GET  /ws                    — WebSocket upgrade for streaming responses
+POST /oauth/callback        — OAuth redirect handler (was OAuthCallbackWorker)
+POST /skills/add            — register a new MCP skill URL
+GET  /skills                — list registered skills for a user
+POST /credentials/store     — store encrypted credential (called internally)
+GET  /admin/status          — health + stats, used by ratatui management TUI
+GET  /manage                — serves the ratzilla WASM bundle (static files)
+```
+
+Authentication on all routes: `Authorization: Bearer {ADMIN_TOKEN}` for the admin routes, Telegram's webhook secret header for `/message`, user session token for `/ws` and `/manage`.
+
+### 1.7 — `main.rs` Structure
+
+```rust
+// crates/edgeclaw-server/src/main.rs (prose)
+```
+
+Startup sequence:
+
+1. Load config from environment variables (via `dotenvy` in dev, Docker env in prod)
+2. Open SQLite pool: `SqlitePoolOptions::new().max_connections(1).connect(&db_url)`  
+   — SQLite is single-writer; max_connections(1) on the write pool prevents contention
+3. Run `sqlx::migrate!()` — applies any pending migrations
+4. Spawn the scheduler background task
+5. Spawn the Telegram polling task (or register webhook) if configured
+6. Start the axum server on `0.0.0.0:8080`
+7. Register `SIGTERM` / `SIGINT` handlers for graceful shutdown — drain in-flight requests, close pool
+
+**SQLite connection note:** Use `max_connections(1)` for the write pool and a separate read pool with higher concurrency. SQLite allows multiple concurrent readers but only one writer. All writes from the agent turn loop, scheduler, and credential store go through the write pool, which serialises them automatically via the pool.
+
+### 1.8 — Cargo.toml
+
+```toml
+# crates/edgeclaw-server/Cargo.toml
+[dependencies]
+agent-core       = { path = "../agent-core" }
+mcp-client       = { path = "../mcp-client" }
+skill-registry   = { path = "../skill-registry" }
+credential-store = { path = "../credential-store" }
+
+tokio            = { version = "1", features = ["full"] }
+axum             = { version = "0.8", features = ["ws"] }
+tower-http       = { version = "0.6", features = ["fs", "cors", "trace"] }
+sqlx             = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+reqwest          = { version = "0.12", features = ["json"] }
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+tokio-tungstenite = "0.24"
+cron             = "0.12"
+dotenvy          = "0.15"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow           = "1"
+thiserror        = "1"
+zeroize          = "1"
+rand             = { version = "0.8", features = ["getrandom"] }
+base64           = "0.22"
+
+# ring and aes-gcm — no WASM constraints here, use freely
+ring             = "0.17"
+aes-gcm          = "0.10"
+```
+
+---
+
+## Part 2 — Docker Compose
+
+### 2.1 — Service Layout
+
+The compose file runs three categories of service:
+
+- **`agent`** — the main `edgeclaw-server` process
+- **`skill-*`** — one container per skill Worker (stateless HTTP)
+- **`caddy`** — reverse proxy handling TLS termination and routing
+
+```
+internet
+    │  HTTPS
+    ▼
+┌─────────┐
+│  Caddy  │  TLS termination, routing
+└────┬────┘
+     │
+     ├──────────────────────────────┐
+     ▼                              ▼
+┌──────────────┐          ┌─────────────────┐
+│   agent      │          │  skill services │
+│  (port 8080) │          │  (8081, 8082,…) │
+│              │          │                 │
+│  SQLite vol  │          │  stateless      │
+└──────────────┘          └─────────────────┘
+```
+
+### 2.2 — `docker-compose.yml`
+
+```yaml
+name: edgeclaw
+
+services:
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - agent-data:/data          # SQLite lives here
+    ports:
+      - "127.0.0.1:8080:8080"    # only exposed to localhost; Caddy proxies
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - skill-web-search
+      - skill-http-fetch
+
+  skill-web-search:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.skill
+      args:
+        SKILL: skill-web-search
+    restart: unless-stopped
+    env_file: .env.skills
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  skill-http-fetch:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.skill
+      args:
+        SKILL: skill-http-fetch
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8082:8080"
+
+  skill-gmail:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.skill
+      args:
+        SKILL: skill-gmail
+    restart: unless-stopped
+    env_file: .env.skills
+    ports:
+      - "127.0.0.1:8083:8080"
+
+  skill-github:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.skill
+      args:
+        SKILL: skill-github
+    restart: unless-stopped
+    env_file: .env.skills
+    ports:
+      - "127.0.0.1:8084:8080"
+
+  skill-google-calendar:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.skill
+      args:
+        SKILL: skill-google-calendar
+    restart: unless-stopped
+    env_file: .env.skills
+    ports:
+      - "127.0.0.1:8085:8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  agent-data:
+  caddy-data:
+  caddy-config:
+```
+
+### 2.3 — `Dockerfile.server`
+
+Uses `cargo-chef` to cache Rust dependency compilation across builds — without it, every source change rebuilds all dependencies from scratch, which is the main Docker+Rust pain point.
+
+```dockerfile
+# docker/Dockerfile.server
+
+# Stage 1: cargo-chef planner — computes the dependency recipe
+FROM rust:1.85-alpine AS chef
+WORKDIR /app
+RUN apk add --no-cache musl-dev sqlite-dev
+RUN cargo install cargo-chef
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 2: dependency cache — only rebuilt when Cargo.toml/Cargo.lock change
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Stage 3: actual build — fast when only src/ changed
+COPY . .
+RUN cargo build --release --bin edgeclaw-server
+
+# Stage 4: minimal runtime image
+FROM alpine:3.21 AS runtime
+RUN apk add --no-cache ca-certificates sqlite-libs curl
+RUN addgroup -S edgeclaw && adduser -S edgeclaw -G edgeclaw
+COPY --from=builder /app/target/release/edgeclaw-server /usr/local/bin/
+RUN mkdir -p /data && chown edgeclaw:edgeclaw /data
+USER edgeclaw
+VOLUME ["/data"]
+ENV DATABASE_URL=sqlite:///data/edgeclaw.db
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s \
+    CMD curl -f http://localhost:8080/health || exit 1
+CMD ["edgeclaw-server"]
+```
+
+### 2.4 — `Dockerfile.skill`
+
+All skill binaries share one Dockerfile parameterised by `ARG SKILL`. This avoids maintaining five nearly identical Dockerfiles.
+
+```dockerfile
+# docker/Dockerfile.skill
+
+FROM rust:1.85-alpine AS chef
+WORKDIR /app
+RUN apk add --no-cache musl-dev
+RUN cargo install cargo-chef
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+ARG SKILL
+RUN cargo build --release --bin ${SKILL}
+
+FROM alpine:3.21 AS runtime
+RUN apk add --no-cache ca-certificates curl
+RUN addgroup -S skill && adduser -S skill -G skill
+ARG SKILL
+COPY --from=builder /app/target/release/${SKILL} /usr/local/bin/skill-server
+USER skill
+EXPOSE 8080
+CMD ["skill-server"]
+```
+
+### 2.5 — Environment Variables
+
+Two env files — one for the agent, one for skills — so skill OAuth client secrets are not in the agent's environment.
+
+```bash
+# .env  (agent — never committed)
+DATABASE_URL=sqlite:///data/edgeclaw.db
+ANTHROPIC_API_KEY=sk-ant-...
+TOKEN_MASTER_KEY=<32 random bytes, base64-encoded>
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USER_ID=123456789
+AGENT_NAME=Aria
+DEFAULT_MODEL=claude-sonnet-4-6
+MAX_ITERATIONS=10
+ADMIN_TOKEN=<random token for management API>
+
+# Skill URLs — agent uses these to route MCP calls
+SKILL_WEB_SEARCH_URL=http://skill-web-search:8080
+SKILL_HTTP_FETCH_URL=http://skill-http-fetch:8080
+SKILL_GMAIL_URL=http://skill-gmail:8080
+SKILL_GITHUB_URL=http://skill-github:8080
+SKILL_GOOGLE_CALENDAR_URL=http://skill-google-calendar:8080
+```
+
+```bash
+# .env.skills  (skill secrets — never committed)
+BRAVE_API_KEY=...
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+```
+
+### 2.6 — Caddyfile
+
+Caddy handles TLS automatically via Let's Encrypt. No cert management needed.
+
+```
+# deploy/Caddyfile
+
+your-agent.domain.com {
+    # Main agent API and WebSocket
+    reverse_proxy /api/* agent:8080
+    reverse_proxy /ws    agent:8080
+    reverse_proxy /oauth/* agent:8080
+
+    # ratzilla management TUI — served as static WASM
+    reverse_proxy /manage* agent:8080
+
+    # Telegram webhook
+    reverse_proxy /telegram/* agent:8080
+}
+```
+
+---
+
+## Part 3 — systemd Service
+
+Docker Compose itself runs under systemd. One unit file starts and stops the entire stack.
+
+```ini
+# deploy/edgeclaw.service
+[Unit]
+Description=EdgeClaw AI Agent
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/edgeclaw
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose pull && /usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Deployment is then:
+
+```bash
+# First deploy
+sudo cp deploy/edgeclaw.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable edgeclaw
+sudo systemctl start edgeclaw
+
+# Update (pulls new images and restarts changed containers only)
+sudo systemctl reload edgeclaw
+
+# View logs
+sudo journalctl -u edgeclaw -f
+# Or per-container:
+docker compose logs -f agent
+```
+
+---
+
+## Part 4 — CLI Changes (`edgeclaw setup`)
+
+The wizard flow changes only in its final deployment step. Everything up to and including the pre-deployment summary is unchanged — the same `inquire` prompts, the same config collection.
+
+**What replaces `wrangler deploy`:**
+
+1. SSH to the VPS (credentials collected during setup, or via SSH key)
+2. `rsync` the `.env` and `.env.skills` files to `/opt/edgeclaw/`
+3. Pull the latest Docker images (`docker compose pull`)
+4. Run `docker compose up -d --remove-orphans`
+5. Wait for the health check to pass
+6. Print the success message
+
+The `edgeclaw-cli` uses the `ssh2` Rust crate for the SSH connection and the `openssh` crate for command execution. No dependency on `wrangler` or Node.js.
+
+**New setup prompts (replacing the Cloudflare-specific ones):**
+
+```
+─── Server Setup ───────────────────────────────────────────
+? VPS hostname or IP  ›  _______________
+  (e.g. 123.456.789.0 or agent.yourdomain.com)
+
+? SSH user  ›  root
+  (The user Docker Compose will run under)
+
+? SSH authentication
+  › SSH key (recommended)
+    Password
+
+[If SSH key selected:]
+? Path to private key  ›  ~/.ssh/id_ed25519
+  ✓ Key found and readable
+
+  ✓ Connecting to server...
+  ✓ Docker found: 27.3.1
+  ✓ Docker Compose found: 2.30.1
+  ✓ /opt/edgeclaw directory created
+```
+
+The cost estimate in the summary screen updates:
+
+```
+  Estimated monthly cost:
+    Hetzner CX22: ~€4.35/mo
+    Anthropic API: ~$1–5/mo depending on usage
+    Domain (optional): ~€1/mo
+```
+
+---
+
+## Part 5 — What the `skill-*` Services Become
+
+Skills were Cloudflare Workers — stateless HTTP handlers. On a VPS they are stateless tokio/axum services in Docker containers. The MCP protocol and tool definitions are unchanged. The only thing that changes is the runtime.
+
+`skill-memory` is the exception — it was a Durable Object with its own SQLite. On the VPS it becomes a simple module inside `edgeclaw-server` itself, backed by the same SQLite database under the `memory_facts` table. There is no strong reason to keep it as a separate process when isolation is handled by the application layer rather than the platform.
+
+```sql
+-- Added to 0001_initial.sql or a new migration
+
+CREATE TABLE IF NOT EXISTS memory_facts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL REFERENCES users(id),
+    key         TEXT    NOT NULL,
+    value       TEXT    NOT NULL,
+    tags        TEXT,               -- JSON array of strings
+    created_at  INTEGER NOT NULL,
+    UNIQUE(user_id, key)
 );
 ```
 
-**`fetch()` handler** — the DO's HTTP entry point, implementing the `DurableObject` trait. Routes on path:
-
-- `POST /message` — runs an agent turn; returns the final answer
-- `POST /skills/add` — registers a new MCP skill URL (Phase 2)
-- `GET /skills` — lists registered skills (Phase 2)
-- `GET /history` — returns recent conversation history
-- `GET /` with `Upgrade: websocket` — upgrades to a hibernating WebSocket
-
-**Agent turn execution:**
-
-1. Query SQLite for recent messages (bounded window, e.g. last 50), registered tools, and system prompt from prefs.
-2. Assemble `AgentContext` and call `agent.run(ctx, user_message)`.
-3. Persist `new_messages` to SQLite immediately.
-4. If `pending_tool_calls` is non-empty:
-   - Check for destructive calls. If any exist, persist them to `pending_approvals`, notify the user, and return — do not execute.
-   - Otherwise execute all tool calls (Phase 1: no-op stubs; Phase 2: real MCP dispatch).
-   - Persist tool result messages to SQLite.
-   - Reassemble `AgentContext` from SQLite (now including results) and call `agent.resume()`.
-   - Repeat until no pending tool calls remain.
-5. Return the final answer.
-
-**WebSocket hibernation** — `AgentDO` accepts WebSocket connections using the Workers hibernation API. The DO can sleep between messages without losing the connection, and `webSocketMessage` is called on wake. This is the foundation for streaming token delivery in Phase 3.
+The `skill-memory` MCP server becomes a set of axum route handlers on the main `edgeclaw-server` at `/skills/memory/*`, backed by this table. No separate container needed.
 
 ---
 
-### 1.6 — Dispatcher Worker (`edgeclaw-worker`)
+## Milestones
 
-A `#[event(fetch)]` handler. Its sole responsibility is resolving a user identity from the incoming request and forwarding to the correct `AgentDO` via `id_from_name()`.
-
-The user identity resolution strategy is pluggable and depends on the messaging frontend: for a Telegram webhook it is the Telegram user ID extracted from the JSON body; for a direct HTTP client it may come from an `Authorization` header. In Phase 1 this can be a simple header or query param for local testing.
-
-Using `id_from_name()` rather than `new_unique_id()` is non-negotiable: `new_unique_id()` creates a new DO instance on every request, silently destroying all conversation history. `id_from_name()` produces a deterministic, globally consistent ID from a string.
-
----
-
-### 1.7 — Multi-Agent Topology
-
-DO-to-DO communication is native to the platform: any DO or Worker can obtain a `Stub` for any other DO via its binding and call `stub.fetch()`. This makes multi-agent composition a first-class primitive with no additional infrastructure.
-
-```
-┌──────────────────────────────────────┐
-│  OrchestratorDO                      │
-│  "orchestrator:task:{task_id}"       │
-│                                      │
-│  Decomposes task, fans out to        │
-│  specialist DOs, synthesises results │
-└───────┬─────────────────┬────────────┘
-        │ stub.fetch()    │ stub.fetch()
-        ▼                 ▼
-┌──────────────┐   ┌──────────────┐
-│ ResearchDO   │   │ WriterDO     │
-│ "agent:      │   │ "agent:      │
-│  researcher" │   │  writer"     │
-│              │   │              │
-│  web-search  │   │  http-fetch  │
-│  skill       │   │  skill       │
-└──────────────┘   └──────────────┘
-```
-
-Each sub-agent is an independent DO with its own SQLite, skill bindings, and conversation history. The platform guarantees single-threaded execution per DO, so there are no race conditions on state. Concurrent `stub.fetch()` calls from the orchestrator to different DOs execute in parallel on the platform side.
-
----
-
-### 1.8 — wrangler.toml (Phase 1)
-
-```toml
-name = "edgeclaw"
-main = "build/worker/shim.mjs"  # generated by worker-build
-compatibility_date = "2026-01-01"
-
-[build]
-command = "cargo install -q worker-build && worker-build --release"
-
-[[durable_objects.bindings]]
-name = "AGENT_DO"
-class_name = "AgentDo"  # matches the Rust struct name
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["AgentDo"]
-
-# Set via: wrangler secret put ANTHROPIC_API_KEY
-```
-
----
-
-### 1.9 — Phase 1 Milestones
+### Server Core (M5.1–M5.5)
 
 | Milestone | Description | Done When |
 |---|---|---|
-| M1.1 | `agent-core` compiles to `wasm32-unknown-unknown` with no workers-rs dependency | `cargo build --target wasm32-unknown-unknown` clean |
-| M1.2 | SQLite schema initialises and messages round-trip correctly | Miniflare integration test persists and reloads messages |
-| M1.3 | LLM client makes real Anthropic API calls via `worker::Fetch` | Single-turn smoke test passes against real API |
-| M1.4 | ReAct loop handles multi-turn conversation including tool-call boundary | Multi-turn fixture test passes end-to-end |
-| M1.5 | Dispatcher routes two different users to independent DO instances | Separate conversation histories confirmed |
-| M1.6 | WebSocket connection survives DO sleep/wake cycle | Hibernation test with Miniflare passes |
-| M1.7 | Orchestrator DO spawns two sub-agent DOs and collects results | Two-agent fan-out smoke test passes |
-| M1.8 | `wrangler deploy` and real end-to-end HTTP message | Deployed worker returns a correct response |
-
----
-
-### 1.10 — Phase 1 Dependencies
-
-```toml
-# crates/agent-core/Cargo.toml
-[dependencies]
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-async-trait = "0.1"
-thiserror   = "1"
-
-# HTTP backend — feature-flagged
-[features]
-native = ["reqwest", "tokio"]
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.12", features = ["json"], optional = true }
-tokio   = { version = "1", features = ["rt", "macros"], optional = true }
-```
-
-```toml
-# crates/edgeclaw-worker/Cargo.toml
-[dependencies]
-agent-core  = { path = "../agent-core" }
-worker      = { version = "0.5", features = ["http"] }
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-
-[lib]
-crate-type = ["cdylib"]
-```
-
-```toml
-# dev tooling (package.json / npm)
-# wrangler    ^3   — deploy and local dev
-# miniflare   ^3   — full DO + SQLite emulation for integration tests
-# vitest      ^2   — test runner (Miniflare tests are written in JS/TS
-#                    per workers-rs documentation guidance)
-```
-
-> **Testing note:** `workers-rs` documentation explicitly states that Miniflare-based integration tests must be written in JavaScript or TypeScript, since Miniflare is a Node package. Unit tests for `agent-core` logic can and should be written in Rust using `cargo test` with the `native` feature. End-to-end DO tests use the Miniflare harness from a small JS test file.
-
----
-
-## Phase 2 — Skills & MCP Support
-
-### Goal
-
-Replace the Phase 1 no-op tool executor with a live `SkillRegistry` backed by the `AgentDO`'s SQLite `skills` table. Each skill is a remote MCP server — either a bundled Cloudflare Worker (for reference skills) or a user-provided URL. The `mcp-client` crate handles MCP protocol communication over HTTP/SSE, compilable to WASM. Stateful skills like `skill-memory` are themselves Durable Objects in Rust, giving them the same identity and persistence guarantees as the agent.
-
-### Deliverables
-
-- `mcp-client` crate — MCP protocol client, WASM-compatible, no workers-rs dependency
-- `skill-registry` crate — skill registration, discovery, and dispatch backed by DO SQLite
-- Reference skills: `skill-memory` (Rust DO), `skill-web-search` (Rust Worker), `skill-http-fetch` (Rust Worker)
-- Dynamic skill addition at runtime — user provides MCP URL in chat; tools appear on the next turn without redeployment
-- Human-in-the-loop pause before destructive tool calls
-
----
-
-### 2.1 — MCP Client (`mcp-client`)
-
-The `mcp-client` crate implements the [Model Context Protocol](https://modelcontextprotocol.io) over HTTP and SSE. Like `agent-core`, it has no workers-rs dependency and uses a `HttpBackend` trait for transport, allowing it to be tested natively and run on WASM.
-
-Responsibilities:
-
-- **Connect** — POST to the MCP server's initialise endpoint, exchange capabilities
-- **List tools** — GET the server's tool manifest; deserialise into `Vec<ToolDefinition>`
-- **Call tool** — POST a tool invocation; deserialise the result into `ToolCallResult`
-- **Reconnect** — detect dropped connections and re-initialise transparently
-
-The `SkillRegistry` owns one `McpClient` per registered skill and is responsible for keeping connections alive for the duration of a DO invocation.
-
----
-
-### 2.2 — Skill Registry (`skill-registry`)
-
-The `SkillRegistry` is not a persistent struct — it is assembled from the `AgentDO`'s SQLite `skills` table at the start of each turn and discarded at the end. Each row in `skills` contains the skill name, URL, and a JSON-serialised `Vec<ToolDefinition>` cached from the last successful connection.
-
-Responsibilities:
-
-- **`from_db_rows()`** — reconnect to each registered skill's MCP URL and build the in-memory index
-- **`register()`** — connect to a new URL, discover its tools, return a row for the caller to persist to SQLite
-- **`all_tools()`** — return the union of all tool definitions across all skills, namespaced by skill name to avoid collisions
-- **`dispatch()`** — route a `ToolCall` to the correct skill's `McpClient` and return a `ToolResult`
-
-The registry implements the `ToolExecutor` trait defined in `agent-core`, so `AgentDO` can pass it directly to the agent loop without any coupling to MCP details.
-
-**Dynamic registration flow:**
-
-When the user says "add this MCP server", `AgentDO` calls `registry.register(name, url)`, receives the discovered tools, writes the row to SQLite immediately (strongly consistent — no propagation lag), and replies confirming the available tools. On the very next turn, `from_db_rows()` includes the new row and the LLM sees the new tools in its context.
-
----
-
-### 2.3 — Skill Isolation Model
-
-Each skill is a separate Worker or Durable Object. The only communication channel between a skill and `AgentDO` is HTTP — `AgentDO` calls the skill's MCP endpoint over the network. The Workers V8 isolate boundary enforces this: there is no shared memory, no shared file system, no shared process.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  AgentDO  (Rust Durable Object)                          │
-│  Single-threaded, strongly consistent                    │
-│                                                          │
-│  SkillRegistry                                           │
-│       │                                                  │
-│       │  MCP over HTTP / SSE — V8 isolate boundary      │
-│       │  No shared memory possible                       │
-│       │                                                  │
-│  ┌────┴──────┐   ┌────────────┐   ┌──────────────────┐  │
-│  │skill-mem  │   │skill-srch  │   │ skill-http-fetch │  │
-│  │           │   │            │   │                  │  │
-│  │ Rust DO   │   │ Rust Worker│   │ Rust Worker      │  │
-│  │ SQLite    │   │ (stateless)│   │ (stateless)      │  │
-│  │ per-user  │   │            │   │ + URL allowlist  │  │
-│  └───────────┘   └────────────┘   └──────────────────┘  │
-└──────────────────────────────────────────────────────────┘
-```
-
-Isolation guarantees:
-
-- **No shared memory** — V8 isolate boundary between agent and all skills; enforced by the platform
-- **No filesystem access** — Cloudflare Workers have no disk
-- **Per-user skill state** — `skill-memory` is keyed `memory:{user_id}`, giving each user a fully isolated memory store
-- **Blast radius contained** — a compromised or buggy skill can only affect its own MCP response, not the agent's SQLite or another skill's state
-- **Single-threaded DO serialisation** — concurrent requests to a given DO are serialised by the platform; no race conditions on the `skills` table or conversation history
-
----
-
-### 2.4 — Reference Skills
-
-#### `skill-memory` — Rust Durable Object
-
-A Rust DO implementing an MCP server. Backed by its own embedded SQLite database. DO identity: `memory:{user_id}` — one per user, guaranteed isolated.
-
-Exposes tools: `memory_store`, `memory_retrieve`, `memory_list`, `memory_delete`.
-
-Because it is a DO, its state is durable and strongly consistent. It can be extended with semantic search (via embeddings stored in SQLite or routed to Vectorize) in Phase 3.
-
-#### `skill-web-search` — Rust Worker
-
-A stateless Rust Worker wrapping a search API (Brave Search, Tavily, or SearXNG). The API key is stored as a Worker secret binding.
-
-Exposes tools: `web_search(query, max_results?)`.
-
-#### `skill-http-fetch` — Rust Worker
-
-A stateless Rust Worker that fetches and sanitises URL content. The allowlist of permitted domains is read from the calling `AgentDO`'s `prefs` table, passed as an argument on the MCP call, and enforced inside the skill Worker.
-
-Exposes tools: `http_fetch(url)`.
-
----
-
-### 2.5 — Multi-Agent Patterns with Skills
-
-Skills compose naturally with the multi-agent topology from Phase 1. Each sub-agent DO has its own skill bindings — the orchestrator delegates tasks knowing each specialist only has access to the tools relevant to its role.
-
-**Swarm pattern** — parallel specialised agents:
-
-The orchestrator DO fans out to specialist DOs using concurrent `stub.fetch()` calls. Each specialist runs its own `AgentDO` turn with its own tool set and returns a result. The orchestrator assembles the results and runs a final synthesis turn.
-
-**Pipeline pattern** — sequential skill-enriched stages:
-
-```
-IngestDO        EnrichDO         SummaryDO        NotifyDO
-(http-fetch)    (web-search)     (no tools)        (email skill)
-     │               │               │                  │
-     └───────────────┴───────────────┴──────────────────┘
-               each DO calls the next via stub.fetch()
-```
-
-**Human-in-the-loop** — the DO's single-threaded execution model makes pausing natural. When `pending_tool_calls` contains a call flagged as destructive (e.g. `send_email`, `delete_file`), the DO persists the pending call to the `pending_approvals` table, sends a confirmation request over the WebSocket connection, and returns. The DO hibernates. When the user approves via a subsequent message, the DO reads the pending approval from SQLite, executes it, and resumes the loop.
-
----
-
-### 2.6 — Updated wrangler.toml (Phase 2)
-
-```toml
-name = "edgeclaw"
-main = "build/worker/shim.mjs"
-compatibility_date = "2026-01-01"
-
-[build]
-command = "cargo install -q worker-build && worker-build --release"
-
-# Primary agent actor
-[[durable_objects.bindings]]
-name = "AGENT_DO"
-class_name = "AgentDo"
-
-# Memory skill — separate DO, isolated from agent state
-[[durable_objects.bindings]]
-name = "MEMORY_SKILL_DO"
-class_name = "MemorySkillDo"
-script_name = "skill-memory"    # deployed as a separate Worker script
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["AgentDo", "MemorySkillDo"]
-
-# Stateless skill Workers — bound via service bindings
-[[services]]
-binding = "SKILL_WEB_SEARCH"
-service  = "skill-web-search"
-
-[[services]]
-binding = "SKILL_HTTP_FETCH"
-service  = "skill-http-fetch"
-
-# Secrets set via: wrangler secret put <NAME>
-# ANTHROPIC_API_KEY
-# SEARCH_API_KEY
-```
-
----
-
-### 2.7 — Phase 2 Milestones
+| M5.1 | `edgeclaw-server` crate created, axum + sqlx wired up, health endpoint responds | `cargo run` starts server, `/health` returns 200 |
+| M5.2 | SQLite migrations run on startup, all tables created | `sqlx::migrate!()` applies cleanly |
+| M5.3 | Agent turn executes with real Anthropic API call, persists messages | Multi-turn conversation via `curl` works |
+| M5.4 | Scheduler polls `scheduled_tasks` and fires one-shot tasks | One-shot task executes and marks itself done |
+| M5.5 | Cron tasks compute next `run_at` and re-arm correctly | Recurring task fires at least twice |
+
+### Credential Store — Envelope Encryption (M5.6)
+
+_Detail: [Credentials Spec](EDGECLAW_CREDENTIALS_SPEC.md) Phase 1_
 
 | Milestone | Description | Done When |
 |---|---|---|
-| M2.1 | `mcp-client` connects to a real MCP server and lists tools | Integration test against a local MCP server |
-| M2.2 | `mcp-client` invokes a tool and returns a typed result | Tool call round-trip test passes |
-| M2.3 | `SkillRegistry` loads from SQLite and dispatches tool calls correctly | Multi-skill dispatch test in Miniflare |
-| M2.4 | `skill-memory` deployed as Rust DO and integrated | Agent stores and retrieves facts across turns |
-| M2.5 | `skill-web-search` deployed and integrated | Agent answers questions using live search results |
-| M2.6 | Dynamic skill registration survives DO eviction | Register skill, evict DO, restart — skill still present |
-| M2.7 | Orchestrator DO fans out to two specialist DOs in parallel | Two-agent swarm smoke test passes |
-| M2.8 | Human-in-the-loop: DO pauses on destructive tool call and resumes after approval | Approval flow over WebSocket confirmed |
-| M2.9 | Full end-to-end with 2+ skills on real Cloudflare deployment | Demo scenario passes against production |
+| M5.6.1 | `credential-store` crate compiles and unit tests pass | `cargo test -p credential-store` clean |
+| M5.6.2 | HKDF derivation produces distinct keys for different providers and salts | Unit test with known vectors passes |
+| M5.6.3 | AES-256-GCM round-trips plaintext through encrypt/decrypt | Property test: decrypt(encrypt(pt)) == pt for random pt |
+| M5.6.4 | `store` and `load` persist and recover credentials via sqlx SQLite | Integration test with real SQLite round-trip |
+| M5.6.5 | Tampered ciphertext or nonce causes decryption failure | Authentication tag rejection test passes |
+| M5.6.6 | Token refresh detects expiry and calls provider token endpoint | Fixture-based refresh test with mock HTTP |
+| M5.6.7 | Refresh failure marks credential invalid and surfaces error to user | Error propagation test passes |
+| M5.6.8 | Plaintext buffers are zeroed on drop | `zeroize` integration confirmed in test |
 
----
+### Credential Store — OAuth PKCE Flow (M5.7)
 
-## Security Model Summary
+_Detail: [Credentials Spec](EDGECLAW_CREDENTIALS_SPEC.md) Phase 2_
 
-| Threat | Phase 1 Mitigation | Phase 2 Mitigation |
+| Milestone | Description | Done When |
 |---|---|---|
-| Prompt injection via tool output | Max iterations cap; structured result parsing | Same + output length cap and sanitisation in `mcp-client` |
-| Runaway agent (e.g. deletes inbox) | No tools in Phase 1 | Human-in-the-loop pause before destructive tool calls |
-| Skill escaping its sandbox | N/A | V8 isolate + HTTP-only boundary; shared memory is architecturally impossible |
-| Cross-user state leakage | DO identity tied to authenticated user ID | Same; `skill-memory` DO also keyed per user |
-| Malicious or hijacked MCP server | N/A | URL allowlist in `AgentDO` prefs; only user-declared skill URLs are used |
-| Conversation state tampering | State lives in DO SQLite, not in the client request | Same |
-| API key exposure | Stored as Worker secret binding; never written to SQLite | Same; secrets not accessible to skill Workers |
-| Race conditions on DO state | Platform serialises all requests to a given DO | Same; tool dispatch inside a single DO turn is sequential |
-| Sub-agent acting outside its delegated scope | N/A | Each sub-agent DO has its own skill bindings; orchestrator controls what task it delegates |
+| M5.7.1 | `OAuthFlowState` created in memory, generates PKCE pair | Unit test: code_challenge == BASE64URL(SHA256(code_verifier)) |
+| M5.7.2 | `/oauth/callback` handler routes callback to correct flow by nonce | Integration test with test server |
+| M5.7.3 | Token exchange completes against mock provider endpoint | Fixture-based token exchange test |
+| M5.7.4 | Tokens written encrypted to SQLite via credential store | End-to-end: credential readable after flow |
+| M5.7.5 | Cleanup task removes expired flows from in-memory map | Test: expired entry absent after cleanup runs |
+| M5.7.6 | User notified via WebSocket on successful connection | WS message received after completion |
+| M5.7.7 | Expired flow rejected cleanly | `complete` after `expires_at` returns error, no token written |
+| M5.7.8 | Full PKCE round-trip against real GitHub OAuth sandbox | Manual end-to-end on `cargo run` or `docker compose up` |
 
----
+### Credential Store — Skill Installation (M5.8)
 
-## Open Questions for Phase 3+
+_Detail: [Credentials Spec](EDGECLAW_CREDENTIALS_SPEC.md) Phase 3_
 
-- **Authentication to user-provided MCP servers** — OAuth PKCE flow managed by `AgentDO`? Bearer tokens stored in DO SQLite with encrypted values? This needs a design before dynamic skill registration is exposed to untrusted server URLs.
-- **Streaming token delivery** — `AgentDO` already supports WebSocket hibernation. The next step is streaming LLM tokens over the WebSocket as they arrive, rather than waiting for the complete response. Requires SSE-stream parsing in the LLM client.
-- **Cloudflare Workflows for long-running tasks** — for agent runs lasting minutes or hours (e.g. deep research), Cloudflare Workflows (built on DOs, up to 25,000 steps, 1GB persisted state, automatic retry) is a better fit than a single DO invocation. `AgentDO` could hand off long tasks to a Workflow and poll for completion.
-- **Workers AI fallback** — route privacy-sensitive tasks or cost-overflow to Cloudflare Workers AI (on-device small models). The `base_url` field on `LlmConfig` already supports this; the routing policy needs defining.
-- **Messaging frontends** — Telegram webhook is the natural Phase 3 integration. The dispatcher routes `POST /telegram/{user_id}` to `AgentDO.id_from_name("agent:telegram:{user_id}")`. WhatsApp via Twilio API second.
-- **Conversation window management** — the SQLite `messages` table makes windowing a simple `ORDER BY id DESC LIMIT N` query. A summarisation strategy for archiving old history before the context window overflows needs to be defined.
-- **DO eviction latency** — DOs evict after approximately 10 seconds of inactivity. For latency-sensitive frontends (e.g. voice), keep-alive pings from the messaging layer or pre-warming on incoming webhook receipt may be needed.
-- **workers-rs memory leak (issue #722)** — monitor resolution of the known memory leak on DO eviction in `workers-rs` before scaling to production traffic.
+| Milestone | Description | Done When |
+|---|---|---|
+| M5.8.1 | `skill-gmail` container starts and lists messages with a real token | Manual smoke test against Gmail API |
+| M5.8.2 | `skill-gmail` destructive tools trigger approval flow | Approval round-trip test via WebSocket |
+| M5.8.3 | `skill-github` container starts and lists repos and issues | Manual smoke test against GitHub API |
+| M5.8.4 | `skill-github` rate limit surfaced in tool error response | Rate limit header parsed and returned in ToolCallResult |
+| M5.8.5 | `skill-google-calendar` container starts and lists events | Manual smoke test against Calendar API |
+| M5.8.6 | `calendar_find_free_slots` returns correct free blocks | Unit test against known freebusy fixture |
+| M5.8.7 | Token refresh works end-to-end for Google skills (1-hour expiry) | Integration test: expire token artificially, confirm refresh |
+| M5.8.8 | `credentials_list` tool returns inventory without token material | Confirmed no token bytes in response |
+| M5.8.9 | Disconnect removes credential row and confirms to user | SQLite row absent after disconnect command |
+| M5.8.10 | Full multi-skill scenario: agent reads GitHub issues, creates calendar event | End-to-end demo with real APIs |
+
+### Infrastructure & Deployment (M5.9–M5.12)
+
+| Milestone | Description | Done When |
+|---|---|---|
+| M5.9 | `skill-web-search` container builds and responds to MCP tool calls | Search result returned via MCP |
+| M5.10 | `docker compose up` starts all services, Caddy proxies correctly | Full stack running on local Docker |
+| M5.11 | Multi-stage Dockerfile builds produce <30MB image | `docker images` confirms size |
+| M5.12 | Deployed to Hetzner VPS, systemd service starts on boot | `systemctl status edgeclaw` shows active |
+| M5.13 | Telegram message triggers agent turn end-to-end | Real Telegram message gets a real reply |
+
+### TUI — Setup Wizard (M5.14)
+
+_Detail: [TUI Spec](EDGECLAW_TUI_SPEC.md) Part 1_
+
+| Milestone | Description | Done When |
+|---|---|---|
+| M5.14.1 | `clap` entry point: `setup`, `manage`, `--help` all parse correctly | `cargo test` for CLI parsing passes |
+| M5.14.2 | Stage 1: SSH connection prompt, live connectivity verify, Docker check | Manual run with real VPS succeeds |
+| M5.14.3 | Stage 2: Agent name and Telegram bot token collected and verified | Bot token verified via Telegram API |
+| M5.14.4 | Stage 3: Model selection renders table, API key verified with 1-token call | Live verify against Anthropic API passes |
+| M5.14.5 | Stage 4: Multi-select skill picker, OAuth credential collection per skill | All three OAuth flows collect correctly |
+| M5.14.6 | Pre-deployment summary renders all collected config | Visual review confirms all fields present |
+| M5.14.7 | Deployment SSHs to VPS, rsyncs env files, runs `docker compose up -d` | Full end-to-end deploy from `edgeclaw setup` |
+| M5.14.8 | `edgeclaw.toml` written correctly, no secrets in file | Config file audit: no secret values present |
+
+### TUI — Management Dashboard (M5.15)
+
+_Detail: [TUI Spec](EDGECLAW_TUI_SPEC.md) Part 2_
+
+| Milestone | Description | Done When |
+|---|---|---|
+| M5.15.1 | `ratatui` management TUI launches with Status screen live data | Status screen renders with real `/admin/status` data |
+| M5.15.2 | Skills screen shows installed skills with OAuth status | skill-gmail and skill-github shown correctly |
+| M5.15.3 | Logs screen streams live server logs with filter | Logs visible within 5s of a Telegram message |
+| M5.15.4 | Settings screen edits and redeploys a changed field | Model change reflected in running container |
+| M5.15.5 | Secrets screen rotates ANTHROPIC_API_KEY via SSH env update | Only target secret updated, container restarted |
+| M5.15.6 | `TOKEN_MASTER_KEY` rotation warning shown before rotating | Warning text visible when row selected |

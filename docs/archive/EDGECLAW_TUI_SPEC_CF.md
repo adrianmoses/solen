@@ -1,18 +1,16 @@
 # EdgeClaw — Onboarding TUI Specification
 
-_Original Cloudflare Workers version archived at docs/archive/EDGECLAW_TUI_SPEC_CF.md._
-
 > A native Rust TUI for first-run setup and ongoing agent management, built with `inquire` for the wizard flow and `ratatui` for the persistent management dashboard.
 
 ---
 
 ## Overview
 
-OpenClaw's onboarding is a web UI that requires a running server before you can configure it. EdgeClaw's onboarding is a single native binary — `edgeclaw-cli` — that a user downloads, runs, and completes setup in under two minutes. It handles everything: VPS connection, agent naming, model selection, API key configuration, initial skill installation, and deployment via Docker Compose.
+OpenClaw's onboarding is a web UI that requires a running server before you can configure it. EdgeClaw's onboarding is a single native binary — `edgeclaw-cli` — that a user downloads, runs, and completes setup in under two minutes. It handles everything: Cloudflare account connection, agent naming, model selection, API key configuration, initial skill installation, and deployment.
 
 The `edgeclaw-cli` binary serves two purposes:
 
-1. **Setup wizard** (`edgeclaw setup`) — a sequential `inquire`-driven flow run once on first install. Walks the user through all configuration, writes a local `edgeclaw.toml`, and deploys to the VPS via SSH.
+1. **Setup wizard** (`edgeclaw setup`) — a sequential `inquire`-driven flow run once on first install. Walks the user through all configuration, writes a local `edgeclaw.toml`, and deploys to Cloudflare.
 2. **Management TUI** (`edgeclaw manage`) — a persistent `ratatui` dashboard for ongoing operations: monitoring agent status, managing skills, rotating keys, and tailing logs.
 
 ---
@@ -45,7 +43,7 @@ edgeclaw/
 │       │   ├── main.rs
 │       │   ├── wizard/      # inquire-based setup flow
 │       │   │   ├── mod.rs
-│       │   │   ├── server.rs
+│       │   │   ├── account.rs
 │       │   │   ├── agent.rs
 │       │   │   ├── model.rs
 │       │   │   └── skills.rs
@@ -69,58 +67,45 @@ The wizard is invoked with `edgeclaw setup`. It detects whether an `edgeclaw.tom
 The wizard is divided into four stages, each in its own module. Each stage returns a typed config struct. The stages run strictly in order:
 
 ```
-Stage 1: Server Setup
+Stage 1: Cloudflare Account
 Stage 2: Agent Identity
 Stage 3: LLM Model Selection
 Stage 4: Skill Installation
 ─────────────────────────────
-       Deploy via SSH
+       Deploy to Cloudflare
 ```
 
-If any stage fails (e.g. unreachable VPS, invalid API key, network error), the wizard prints a clear error, explains what to fix, and re-prompts that stage rather than aborting. Partial progress is not written to disk until all four stages complete successfully — or until the user explicitly saves a draft with `Ctrl+S`.
+If any stage fails (e.g. invalid API key, network error), the wizard prints a clear error, explains what to fix, and re-prompts that stage rather than aborting. Partial progress is not written to disk until all four stages complete successfully — or until the user explicitly saves a draft with `Ctrl+S`.
 
 ---
 
-### 1.2 — Stage 1: Server Setup
+### 1.2 — Stage 1: Cloudflare Account
 
-This stage collects everything needed to connect to the VPS and verifies connectivity and Docker availability before proceeding.
+This stage collects everything needed to deploy to a Cloudflare account and verifies each value before proceeding.
 
 **Prompts (in order):**
 
 ```
-? VPS hostname or IP address  ›  _______________
-  (The IP or hostname of your Hetzner VPS or other server)
+? Cloudflare Account ID  ›  _______________
+  (Find this at: dash.cloudflare.com → right sidebar under "Account ID")
 
-? SSH user  ›  root
-  (Default: root)
+? Cloudflare API Token  ›  ••••••••••••••••••
+  (Needs: Workers Scripts:Edit, Durable Objects:Edit)
 
-? SSH authentication method
-  › Private key (recommended)
-    Password
+  ✓ Verifying API token...  [live check via Cloudflare API]
 
-[If private key selected:]
-? Path to SSH private key  ›  ~/.ssh/id_ed25519
-  (Default: ~/.ssh/id_ed25519)
+? Workers subdomain  ›  [auto-detected from account, shown as default]
+  Your agent will be reachable at: edgeclaw.{subdomain}.workers.dev
 
-[If password selected:]
-? SSH password  ›  ••••••••••••••••••
-
-  ✓ Connecting to VPS via SSH...  [live connectivity check]
-  ✓ SSH connection successful.
-
-  ✓ Checking Docker...            [runs `docker --version` over SSH]
-  ✓ Docker 24.0.7 found.
-
-  ✓ Checking Docker Compose...    [runs `docker compose version` over SSH]
-  ✓ Docker Compose v2.21.0 found.
-
-? Domain name (optional)  ›  agent.yourdomain.com
-  (If set, your agent will be reachable at this domain. Press Enter to skip.)
+? Deploy region preference
+  › Global (recommended) — Cloudflare picks closest location
+    EU only — useful if GDPR data residency matters
+    US only
 ```
 
-The SSH connection is established using the `ssh2` Rust crate. After collecting credentials, the wizard immediately connects to the VPS and runs `docker --version` and `docker compose version` to verify both are installed. If either is missing, it shows an error with installation instructions rather than a generic failure.
+The API token is collected with `inquire::Password` (masked input). After collection, the wizard immediately calls the Cloudflare `/user/tokens/verify` endpoint. If the token lacks required permissions, it shows exactly which permissions are missing rather than a generic error.
 
-If a domain is provided, the wizard stores it for use in the deployment summary. If skipped, the agent will be reachable at `http://{hostname}:3000`.
+The Workers subdomain is fetched from the account after the token is verified, so the user sees their actual subdomain as the default and only needs to confirm it.
 
 ---
 
@@ -154,7 +139,7 @@ If a domain is provided, the wizard stores it for use in the deployment summary.
   This is the only Telegram account that can command your agent.
 ```
 
-The agent name is used as the `system_prompt` preamble and stored in the `.env` file on the VPS. The Telegram bot token and user ID are stored in `.env` on the VPS, never in `edgeclaw.toml` on disk (only a reference `telegram_configured = true` is stored locally).
+The agent name is used as the `system_prompt` preamble and stored in the deployed Worker's `vars`. The Telegram bot token and user ID are stored as Worker secrets, never in `edgeclaw.toml` on disk (only a reference `telegram_configured = true` is stored locally).
 
 ---
 
@@ -247,7 +232,7 @@ For each OAuth-requiring skill selected, the wizard collects the necessary crede
   ─── GitHub OAuth Setup ───
   ? GitHub OAuth App Client ID  ›  _______________
     (Create at: github.com/settings/developers → OAuth Apps → New)
-    Callback URL: https://{domain}/oauth/callback
+    Callback URL: https://edgeclaw.{subdomain}.workers.dev/oauth/callback
 
   ? GitHub OAuth App Client Secret  ›  ••••••••••••••••••
 
@@ -265,7 +250,7 @@ For each OAuth-requiring skill selected, the wizard collects the necessary crede
   ✓ Discovered 4 tools: [tool_a, tool_b, tool_c, tool_d]
 ```
 
-Skill credentials (OAuth client IDs and secrets) are stored in `.env.skills` on the VPS, not in `edgeclaw.toml`. The local config only stores which skills were selected, not their credentials.
+Skill credentials (OAuth client IDs and secrets) are stored as Worker secrets, not in `edgeclaw.toml`. The local config only stores which skills were selected, not their credentials.
 
 If `Web Search` is selected, the wizard immediately asks for the Brave Search API key (or Tavily, with a selection prompt). This is the only skill that requires a key at setup time rather than later OAuth flow.
 
@@ -279,33 +264,31 @@ Before deploying, the wizard renders a full summary of everything that will be c
 ┌─────────────────────────────────────────────────────────────────────┐
 │  EdgeClaw Setup Summary                                             │
 │─────────────────────────────────────────────────────────────────────│
-│  Server       123.456.789.0 (root@)                                 │
-│  Domain       agent.yourdomain.com                                  │
+│  Account      acme-corp.workers.dev                                 │
 │  Agent name   Aria                                                  │
 │  Model        claude-sonnet-4-6                                     │
 │  Interface    Telegram (@AriaBotName)                               │
 │  Skills       Web Search, HTTP Fetch, Gmail, GitHub                 │
 │─────────────────────────────────────────────────────────────────────│
 │  Will deploy:                                                       │
-│    Containers: edgeclaw-server (axum + agent runtime)               │
-│                skill-web-search                                     │
-│                skill-http-fetch                                     │
-│                skill-gmail                                          │
-│                skill-github                                         │
-│                skill-oauth-callback                                 │
-│    Env files:  .env (ANTHROPIC_API_KEY, TOKEN_MASTER_KEY,           │
-│                      TELEGRAM_BOT_TOKEN)                            │
-│                .env.skills (GITHUB_CLIENT_SECRET,                   │
-│                             GOOGLE_CLIENT_SECRET, BRAVE_API_KEY)    │
+│    Workers:   edgeclaw (dispatcher + AgentDO)                       │
+│               skill-web-search                                      │
+│               skill-http-fetch                                      │
+│               skill-gmail                                           │
+│               skill-github                                          │
+│               skill-oauth-callback                                  │
+│    Secrets:   ANTHROPIC_API_KEY, TOKEN_MASTER_KEY,                  │
+│               TELEGRAM_BOT_TOKEN, GITHUB_CLIENT_SECRET,             │
+│               GOOGLE_CLIENT_SECRET, BRAVE_API_KEY                   │
 │─────────────────────────────────────────────────────────────────────│
-│  Estimated monthly cost:                                            │
-│    Hetzner CX22 ~€4.35/mo + Anthropic API usage                    │
+│  Estimated monthly cost (Cloudflare Workers Paid):                  │
+│    $5/mo base + usage (typically <$1/mo for personal use)           │
 └─────────────────────────────────────────────────────────────────────┘
 
 ? Deploy now?  › Yes / Edit / Cancel
 ```
 
-The cost estimate is a static string based on known Hetzner pricing, not a live calculation. "Edit" returns to the beginning of the relevant stage. "Cancel" exits without writing anything.
+The cost estimate is a static string based on known Cloudflare pricing, not a live calculation. "Edit" returns to the beginning of the relevant stage. "Cancel" exits without writing anything.
 
 ---
 
@@ -317,19 +300,21 @@ If the user confirms, the wizard runs the deployment sequence with a live progre
   Deploying EdgeClaw...
 
   [✓] Generating TOKEN_MASTER_KEY
-  [✓] Writing .env and .env.skills
-  [✓] Connecting to VPS via SSH                    ~2s
-  [✓] Uploading .env files via rsync               ~2s
-  [✓] Uploading docker-compose.yml                 ~1s
-  [✓] Pulling Docker images (docker compose pull)  ~30s
-  [✓] Starting containers (docker compose up -d)   ~10s
-  [✓] Waiting for health check (/health)           ~5s
-  [✓] Verifying deployment                         ~2s
+  [✓] Writing wrangler.toml
+  [✓] Building edgeclaw-worker (Rust → WASM)           ~20s
+  [✓] Building skill-web-search                         ~5s
+  [✓] Building skill-http-fetch                         ~5s
+  [✓] Building skill-gmail                              ~5s
+  [✓] Building skill-github                             ~5s
+  [✓] Deploying Workers to Cloudflare                   ~10s
+  [✓] Setting secrets (8 values)
+  [✓] Running Durable Object migrations
+  [✓] Verifying deployment (health check)
 
   ────────────────────────────────────────────────────────
   ✓ EdgeClaw is live!
 
-  Your agent is at:  https://agent.yourdomain.com
+  Your agent is at:  https://edgeclaw.acme-corp.workers.dev
   Telegram:          @AriaBotName — send it a message now!
 
   Next steps:
@@ -340,18 +325,9 @@ If the user confirms, the wizard runs the deployment sequence with a live progre
   Config saved to: ~/.config/edgeclaw/edgeclaw.toml
 ```
 
-The deployment step uses the `ssh2` crate to connect to the VPS. There is no Node.js dependency. The progress indicators are driven by SSH command output — each `[✓]` is printed as the corresponding step completes, not all at once.
+The deployment step shells out to `wrangler` (which must be installed, or the wizard installs it via `npm` if Node is present). The progress indicators are driven by parsing `wrangler` stdout — each `[✓]` is printed as the corresponding step completes, not all at once.
 
-The deployment sequence:
-
-1. Generate `TOKEN_MASTER_KEY` locally using `rand::random::<[u8; 32]>()`, base64-encoded.
-2. Write `.env` and `.env.skills` files locally in a temp directory.
-3. SSH to the VPS and rsync the env files and `docker-compose.yml` to the deployment directory.
-4. Run `docker compose pull` over SSH to fetch the latest images.
-5. Run `docker compose up -d` over SSH to start (or restart) all containers.
-6. Poll the `/health` endpoint until it returns 200 OK or timeout after 30 seconds.
-
-`TOKEN_MASTER_KEY` is written to `.env` on the VPS. It is never stored in the local `edgeclaw.toml`.
+`TOKEN_MASTER_KEY` is generated by the wizard itself using `rand::random::<[u8; 32]>()`, base64-encoded, and passed to `wrangler secret put` via stdin. It is never written to disk.
 
 ---
 
@@ -368,7 +344,6 @@ tokio       = { version = "1", features = ["full"] }
 serde       = { version = "1", features = ["derive"] }
 toml        = "0.8"
 reqwest     = { version = "0.12", features = ["json"] }
-ssh2        = "0.9"
 rand        = { version = "0.8", features = ["getrandom"] }
 base64      = "0.22"
 anyhow      = "1"
@@ -408,23 +383,24 @@ Navigation is via `Tab`/`Shift+Tab` or `j`/`k` (vim-style). `Enter` selects. `Es
 
 ### 2.2 — Screen: Status
 
-The default screen. Pulls live data from the deployed agent via the `/admin/status` endpoint on the VPS.
+The default screen. Pulls live data from the deployed agent via the Cloudflare API.
 
 ```
   Agent Status
   ────────────────────────────────────────────────────────────
   Name          Aria
-  URL           https://agent.yourdomain.com
+  URL           https://edgeclaw.acme-corp.workers.dev
   Model         claude-sonnet-4-6  (change)
   Telegram      @AriaBotName  ✓ connected
   Deployment    2026-03-12 14:22 UTC  (3 days ago)
+  Worker ver.   a3f9c1b
 
-  Server
+  Durable Objects
   ────────────────────────────────────────────────────────────
-  Uptime                     3d 7h 12m
-  Container status           5/5 running
-  SQLite database size       4.8 MB
-  Disk usage                 1.2 GB / 40 GB (3%)
+  AgentDO instances      2 active
+  OAuthDO instances      0 active
+  MemorySkillDO          2 active
+  Total SQLite storage   1.2 MB / 10 GB
 
   Last 24h Activity
   ────────────────────────────────────────────────────────────
@@ -434,7 +410,7 @@ The default screen. Pulls live data from the deployed agent via the `/admin/stat
   Errors                 0
 ```
 
-All data is fetched from the `/admin/status` endpoint on the VPS server. The endpoint returns uptime, container health, SQLite file size, disk usage, and activity counters.
+Activity numbers are fetched from Cloudflare Workers Analytics API. Durable Object counts are fetched via a dedicated `/admin/status` endpoint on the dispatcher Worker, protected by the Cloudflare API token.
 
 ---
 
@@ -460,7 +436,7 @@ Selecting a skill with `Enter` shows a detail pane:
 ```
   ── gmail ───────────────────────────────────────────────────
   Status           Live
-  MCP URL          http://skill-gmail:3001/mcp
+  MCP URL          https://skill-gmail.acme-corp.workers.dev
   OAuth user       user@example.com
   Scopes           gmail.readonly, gmail.send, gmail.modify
   Token expires    in 42 minutes (auto-refresh enabled)
@@ -477,22 +453,22 @@ Pressing `a` to add a skill opens an `inquire` prompt inline (the ratatui frame 
 ### 2.4 — Screen: Logs
 
 ```
-  Server Logs  [Live]  ─────────────────────────────────────────────
+  Worker Logs  [Live]  ─────────────────────────────────────────────
   Filter: ___________  [Enter to apply]   [p] Pause   [c] Clear
 
-  2026-03-15 14:33:01  INFO  [agent:123]  Message received
-  2026-03-15 14:33:01  INFO  [agent:123]  LLM call started (claude-sonnet-4-6)
-  2026-03-15 14:33:03  INFO  [agent:123]  Tool call: gmail_search (query="unread from boss")
-  2026-03-15 14:33:04  INFO  [agent:123]  Tool result: 3 messages found
-  2026-03-15 14:33:04  INFO  [agent:123]  LLM resumed
-  2026-03-15 14:33:06  INFO  [agent:123]  Response sent (2341ms total)
-  2026-03-15 14:33:06  INFO  [agent:123]  Credential refresh: gmail (ok)
+  2026-03-15 14:33:01  INFO  [AgentDO:agent:123]  Message received
+  2026-03-15 14:33:01  INFO  [AgentDO:agent:123]  LLM call started (claude-sonnet-4-6)
+  2026-03-15 14:33:03  INFO  [AgentDO:agent:123]  Tool call: gmail_search (query="unread from boss")
+  2026-03-15 14:33:04  INFO  [AgentDO:agent:123]  Tool result: 3 messages found
+  2026-03-15 14:33:04  INFO  [AgentDO:agent:123]  LLM resumed
+  2026-03-15 14:33:06  INFO  [AgentDO:agent:123]  Response sent (2341ms total)
+  2026-03-15 14:33:06  INFO  [AgentDO:agent:123]  Credential refresh: gmail (ok)
   ...
 
   ↓ auto-scroll  [f] Filter  [/] Search  [q] Back
 ```
 
-Logs are streamed from the server via the `/admin/logs` endpoint or by running `docker compose logs -f` over SSH. The stream is consumed in a `tokio` background task, pushing log lines into a `mpsc` channel that the ratatui render loop consumes. The filter field is a live substring match applied client-side.
+Logs are streamed from Cloudflare Workers Logs API using `reqwest` in a `tokio` background task, pushing log lines into a `mpsc` channel that the ratatui render loop consumes. The filter field is a live substring match applied client-side.
 
 ---
 
@@ -508,16 +484,16 @@ Logs are streamed from the server via the `/admin/logs` endpoint or by running `
   Max tokens          1024                      [edit]
   Telegram user ID    123456789                 [edit]
 
-  Server
+  Deployment
   ────────────────────────────────────────────────────────────
-  VPS hostname        123.456.789.0
-  SSH user            root
-  Domain              agent.yourdomain.com
+  Cloudflare account  acme-corp
+  Workers subdomain   acme-corp.workers.dev
+  Region              Global
 
   [Enter] Edit field   [s] Save and redeploy   [Esc] Back
 ```
 
-Editing a setting opens an `inquire` text prompt. "Save and redeploy" SSHs to the VPS and runs `docker compose up -d` with a progress overlay. Settings that require redeployment (anything stored in `.env`) are marked with a `*` after editing but before saving.
+Editing a setting opens an `inquire` text prompt. "Save and redeploy" runs `wrangler deploy` in the background with a progress overlay. Settings that require redeployment (anything stored as Worker `vars`) are marked with a `*` after editing but before saving.
 
 ---
 
@@ -539,7 +515,7 @@ Editing a setting opens an `inquire` text prompt. "Save and redeploy" SSHs to th
   [r] Rotate selected   [Esc] Back
 ```
 
-Secret values are never displayed — only masked indicators and set-dates are shown. "Rotate" opens an `inquire::Password` prompt, then SSHs to the VPS to update the corresponding value in `.env` (or `.env.skills`) and restarts the affected container via `docker compose up -d`.
+Secret values are never displayed — only masked indicators and set-dates are shown (fetched from the Cloudflare API which returns metadata but not values). "Rotate" opens an `inquire::Password` prompt, then calls `wrangler secret put` under the hood.
 
 The `TOKEN_MASTER_KEY` rotation warning is shown whenever that row is selected, because its implications (all user OAuth tokens become invalid) are non-obvious.
 
@@ -557,22 +533,21 @@ model = "claude-sonnet-4-6"
 max_tokens = 1024
 max_iterations = 10
 
-[server]
-hostname = "123.456.789.0"
-ssh_user = "root"
-ssh_key_path = "~/.ssh/id_ed25519"
-domain = "agent.yourdomain.com"
+[cloudflare]
+account_id = "abc123..."
+subdomain = "acme-corp"
+region = "global"
 
 [telegram]
 configured = true
-# bot_token stored in .env on VPS, not here
+# bot_token stored as Worker secret, not here
 
 [skills]
 installed = ["web-search", "http-fetch", "gmail", "github"]
 
 [skills.web-search]
 provider = "brave"
-# api_key stored in .env.skills on VPS
+# api_key stored as Worker secret
 
 [skills.gmail]
 oauth_configured = false   # true after user completes the OAuth flow in chat
@@ -590,16 +565,16 @@ The config file is stored at `~/.config/edgeclaw/edgeclaw.toml` by default, or i
 | Milestone | Description | Done When |
 |---|---|---|
 | M4.1 | `clap` entry point: `setup`, `manage`, `--help` all parse correctly | `cargo test` for CLI parsing passes |
-| M4.2 | Stage 1: SSH connection prompt, live connectivity verify, Docker check | Manual run with real VPS succeeds |
+| M4.2 | Stage 1: Cloudflare token prompt, live verify call, subdomain fetch | Manual run with real CF account succeeds |
 | M4.3 | Stage 2: Agent name and Telegram bot token collected and verified | Bot token verified via Telegram API |
 | M4.4 | Stage 3: Model selection renders table, API key verified with 1-token call | Live verify against Anthropic API passes |
 | M4.5 | Stage 4: Multi-select skill picker, OAuth credential collection per skill | All three OAuth flows collect correctly |
 | M4.6 | Pre-deployment summary renders all collected config | Visual review confirms all fields present |
-| M4.7 | Deployment SSHs to VPS, rsyncs env files, runs `docker compose up -d` | Full end-to-end deploy from `edgeclaw setup` |
+| M4.7 | Deployment shells out to `wrangler`, streams progress, confirms live | Full end-to-end deploy from `edgeclaw setup` |
 | M4.8 | `edgeclaw.toml` written correctly, no secrets in file | Config file audit: no secret values present |
-| M4.9 | `ratatui` management TUI launches with Status screen live data | Status screen renders with real `/admin/status` data |
+| M4.9 | `ratatui` management TUI launches with Status screen live data | Status screen renders with real CF API data |
 | M4.10 | Skills screen shows installed skills with OAuth status | skill-gmail and skill-github shown correctly |
-| M4.11 | Logs screen streams live server logs with filter | Logs visible within 5s of a Telegram message |
-| M4.12 | Settings screen edits and redeploys a changed field | Model change reflected in running container |
-| M4.13 | Secrets screen rotates ANTHROPIC_API_KEY via SSH env update | Only target secret updated, container restarted |
+| M4.11 | Logs screen streams live Worker logs with filter | Logs visible within 5s of a Telegram message |
+| M4.12 | Settings screen edits and redeploys a changed field | Model change reflected in deployed Worker |
+| M4.13 | Secrets screen rotates ANTHROPIC_API_KEY without touching others | Only target secret updated via wrangler |
 | M4.14 | `TOKEN_MASTER_KEY` rotation warning shown before rotating | Warning text visible when row selected |

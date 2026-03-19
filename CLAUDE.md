@@ -3,57 +3,56 @@
 ## Build & Check Commands
 
 ```bash
-# Check both crates
+# Check crates
 cargo check -p agent-core
-cargo check -p agent-core --target wasm32-unknown-unknown
-cargo check -p edgeclaw-worker --target wasm32-unknown-unknown
+cargo check -p edgeclaw-server
 
 # Run unit tests
 cargo test -p agent-core
 
 # Clippy
 cargo clippy -p agent-core -- -D warnings
-cargo clippy -p edgeclaw-worker --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p edgeclaw-server -- -D warnings
 
 # Format
 cargo fmt --all -- --check
 
-# Build worker for deployment/integration tests
-cargo install worker-build && worker-build --release crates/edgeclaw-worker
+# Run the server locally
+cargo run -p edgeclaw-server
 
-# Integration tests
-npm test
+# Docker build and run
+docker compose up --build
 ```
 
 ## Architecture Rules
 
-- **agent-core** must have zero workers-rs dependency. It compiles to both wasm32 and native targets.
-- **edgeclaw-worker** is the only crate that depends on `worker`. It's a `cdylib` targeting wasm32-unknown-unknown.
-- The `HttpBackend` trait in agent-core abstracts HTTP calls — worker implements it with `worker::Fetch`, tests use `MockHttpBackend`.
+- **agent-core** must have zero server framework dependency. Pure Rust domain logic, compiles to native targets.
+- **edgeclaw-server** is the axum + sqlx host. It depends on `agent-core`, `mcp-client`, `skill-registry`, and `credential-store`.
+- The `HttpBackend` trait in agent-core abstracts HTTP calls — server implements it with `reqwest`, tests use `MockHttpBackend`.
+- Skills are isolated HTTP services deployed as Docker containers.
 
-## worker crate v0.7 Quirks
+## Specs
 
-- `#[durable_object]` goes on the struct only, NOT on the impl block.
-- `DurableObject::fetch` takes `&self` not `&mut self`. Use `Cell<bool>` for interior mutability (e.g., `initialized` flag).
-- `sql.exec()` takes 2 args: `(query, impl Into<Option<Vec<SqlStorageValue>>>)` — pass `None` for no bindings.
-- `SqlCursorRawIterator` yields `Result<Vec<SqlStorageValue>>` — match on `SqlStorageValue::{String, Integer, Float}`.
-- `Request::path()` returns `String`; use `.as_str()` for match arms.
-- `async-trait(?Send)` is required for WASM compatibility.
+- **`EDGECLAW_SPEC.md`** — canonical architecture spec (VPS/tokio/axum/sqlx)
+- **`EDGECLAW_CREDENTIALS_SPEC.md`** — credential encryption, OAuth PKCE, skill installation
+- **`EDGECLAW_TUI_SPEC.md`** — CLI setup wizard and management TUI
+- **`docs/archive/`** — historical Cloudflare Workers/Durable Objects specs (pre-migration)
 
 ## Testing Patterns
 
 - **Unit tests**: `MockHttpBackend` with `RefCell<VecDeque<Vec<u8>>>` for pre-recorded API responses. Fixtures in `tests/fixtures/`.
-- **Integration tests**: Miniflare + Vitest in `tests/integration/`. Requires `worker-build --release crates/edgeclaw-worker` first.
-
-## Durable Object Identity
-
-Always use `id_from_name()` for deterministic agent identity, never `new_unique_id()`. Format: `agent:{user_id}`.
+- **Integration tests**: Against a running `edgeclaw-server` instance or via Docker Compose.
 
 ## Deployment
 
 ```bash
-npx wrangler deploy
-npx wrangler secret put ANTHROPIC_API_KEY
+# Local dev
+cp .env.example .env  # fill in secrets
+cargo run -p edgeclaw-server
+
+# Production (Docker Compose on VPS)
+docker compose up -d
 ```
 
-Model configurable via `CLAUDE_MODEL` env var in wrangler.toml `[vars]` or `.dev.vars`.
+Secrets are configured via environment variables in `.env` (never committed).
+Model configurable via `DEFAULT_MODEL` env var.
