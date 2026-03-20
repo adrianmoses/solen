@@ -4,6 +4,7 @@ members = [
     "crates/agent-core",
     "crates/mcp-client",
     "crates/skill-registry",
+    "crates/credential-store",
     "crates/edgeclaw-server",
     "skills/mcp-server-util",
     "skills/skill-memory",

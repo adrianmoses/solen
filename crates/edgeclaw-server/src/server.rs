@@ -17,6 +17,7 @@ pub struct ServerConfig {
     pub default_model: Option<String>,
     pub anthropic_base_url: String,
     pub max_tasks_per_user: i64,
+    pub token_master_key: Option<[u8; 32]>,
 }
 
 impl ServerConfig {
@@ -37,6 +38,29 @@ impl ServerConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(20),
+            token_master_key: match std::env::var("TOKEN_MASTER_KEY") {
+                Err(_) => {
+                    tracing::warn!(
+                        "TOKEN_MASTER_KEY not set — credential storage will be unavailable"
+                    );
+                    None
+                }
+                Ok(b64) => {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                        Ok(bytes) if bytes.len() == 32 => {
+                            Some(<[u8; 32]>::try_from(bytes.as_slice()).unwrap())
+                        }
+                        _ => {
+                            tracing::error!(
+                                "TOKEN_MASTER_KEY is invalid (expected base64-encoded 32 bytes) \
+                                 — credential storage will be unavailable"
+                            );
+                            None
+                        }
+                    }
+                }
+            },
         }
     }
 

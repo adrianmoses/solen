@@ -25,6 +25,8 @@ anyhow = "1"
 agent-core = { path = "../agent-core", features = ["native"] }
 mcp-client = { path = "../mcp-client", features = ["native"] }
 skill-registry = { path = "../skill-registry", features = ["native"] }
+credential-store = { path = "../credential-store" }
+base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }
 chrono = "0.4"
 cron = "0.15"
