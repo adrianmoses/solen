@@ -1,11 +1,6 @@
 # Rust
 target/
 
-# Node / Wrangler
-node_modules/
-build/
-.wrangler/
-
 # SQLite
 *.db
 *.db-shm
@@ -13,4 +8,4 @@ build/
 
 # Environment
 .env
-.dev.vars
+.env.skills
