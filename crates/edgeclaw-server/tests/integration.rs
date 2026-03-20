@@ -21,6 +21,7 @@ fn test_config(mock_api_url: &str) -> ServerConfig {
         default_model: Some("test-model".to_string()),
         anthropic_base_url: mock_api_url.to_string(),
         max_tasks_per_user: 20,
+        token_master_key: Some([0xAA; 32]),
     }
 }
 
