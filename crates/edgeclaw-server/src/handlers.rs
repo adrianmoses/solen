@@ -4,6 +4,7 @@ use agent_core::ReqwestBackend;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::Html,
     Json,
 };
 use chrono::Utc;
@@ -368,4 +369,201 @@ pub async fn delete_task_handler(
     }
 
     Ok(Json(serde_json::json!({ "deleted": true, "id": task_id })))
+}
+
+// --- Service account import handler ---
+
+#[derive(Deserialize)]
+pub struct ImportServiceAccountRequest {
+    pub user_id: String,
+    pub skill_name: String,
+    pub provider: String,
+    pub scopes: String,
+    pub service_account_json: serde_json::Value,
+}
+
+pub async fn import_service_account_handler(
+    State(state): State<AppState>,
+    Json(body): Json<ImportServiceAccountRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let master_key = state
+        .config
+        .token_master_key
+        .as_ref()
+        .ok_or_else(|| bad_request("master key not configured"))?;
+
+    let private_key = body
+        .service_account_json
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| bad_request("service_account_json missing 'private_key'"))?;
+
+    let client_email = body
+        .service_account_json
+        .get("client_email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| bad_request("service_account_json missing 'client_email'"))?;
+
+    let token_uri = body
+        .service_account_json
+        .get("token_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://oauth2.googleapis.com/token");
+
+    let metadata = credential_store::ServiceAccountMetadata {
+        client_email: client_email.to_string(),
+        token_uri: token_uri.to_string(),
+    };
+
+    credential_store::CredentialStore::store_service_account(
+        &state.db,
+        master_key,
+        &body.user_id,
+        &body.skill_name,
+        &body.provider,
+        private_key,
+        &metadata,
+        &body.scopes,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "credential_type": "service_account",
+        "provider": body.provider,
+        "skill_name": body.skill_name,
+    })))
+}
+
+// --- OAuth handlers ---
+
+#[derive(Deserialize)]
+pub struct OAuthStartRequest {
+    pub user_id: String,
+    pub skill_name: String,
+    pub provider: String,
+    pub scopes: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct OAuthCallbackQuery {
+    pub code: String,
+    pub state: String,
+}
+
+pub async fn oauth_start_handler(
+    State(state): State<AppState>,
+    Json(body): Json<OAuthStartRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let provider_config = state
+        .config
+        .providers
+        .get(&body.provider)
+        .ok_or_else(|| bad_request(format!("provider '{}' is not configured", body.provider)))?
+        .clone();
+
+    let (nonce, authorization_url) = crate::oauth::init_flow(
+        &state.oauth_flows,
+        body.user_id,
+        body.skill_name,
+        &provider_config,
+        body.provider,
+        &state.config.oauth_redirect_uri,
+        body.scopes.as_deref(),
+    );
+
+    let _ = nonce; // nonce is embedded in the authorization_url as `state`
+
+    Ok(Json(serde_json::json!({
+        "authorization_url": authorization_url,
+        "expires_in_seconds": 600,
+    })))
+}
+
+pub async fn oauth_callback_handler(
+    State(state): State<AppState>,
+    Query(params): Query<OAuthCallbackQuery>,
+) -> Html<String> {
+    match handle_oauth_callback(&state, &params.code, &params.state).await {
+        Ok(provider) => {
+            let provider = html_escape(&provider);
+            Html(format!(
+                "<html><body><h1>Authorization successful</h1>\
+                 <p>Your {provider} account has been connected. You can close this window.</p>\
+                 </body></html>"
+            ))
+        }
+        Err(e) => {
+            let error = html_escape(&e.to_string());
+            Html(format!(
+                "<html><body><h1>Authorization failed</h1>\
+                 <p>Error: {error}</p>\
+                 </body></html>"
+            ))
+        }
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
+async fn handle_oauth_callback(
+    state: &AppState,
+    code: &str,
+    nonce: &str,
+) -> Result<String, crate::oauth::OAuthError> {
+    let flow_state = crate::oauth::complete_flow(&state.oauth_flows, nonce)?;
+
+    let provider_config = state
+        .config
+        .providers
+        .get(&flow_state.provider)
+        .ok_or_else(|| {
+            crate::oauth::OAuthError::ProviderNotConfigured(flow_state.provider.clone())
+        })?;
+
+    let client = reqwest::Client::new();
+    let token_resp = crate::oauth::exchange_code(
+        &client,
+        provider_config,
+        code,
+        &flow_state.code_verifier,
+        &state.config.oauth_redirect_uri,
+    )
+    .await?;
+
+    let master_key = state
+        .config
+        .token_master_key
+        .as_ref()
+        .ok_or(crate::oauth::OAuthError::MasterKeyNotConfigured)?;
+
+    let expires_at = token_resp.expires_in.map(|ei| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_secs() as i64
+            + ei
+    });
+
+    credential_store::CredentialStore::store(
+        &state.db,
+        master_key,
+        &flow_state.user_id,
+        &flow_state.skill_name,
+        &flow_state.provider,
+        &token_resp.access_token,
+        token_resp.refresh_token.as_deref(),
+        expires_at,
+        &flow_state.scopes,
+    )
+    .await
+    .map_err(crate::oauth::OAuthError::CredentialStore)?;
+
+    Ok(flow_state.provider)
 }

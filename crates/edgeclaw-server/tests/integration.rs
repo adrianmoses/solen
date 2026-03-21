@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -22,6 +23,8 @@ fn test_config(mock_api_url: &str) -> ServerConfig {
         anthropic_base_url: mock_api_url.to_string(),
         max_tasks_per_user: 20,
         token_master_key: Some([0xAA; 32]),
+        providers: HashMap::new(),
+        oauth_redirect_uri: "http://localhost:8080/oauth/callback".to_string(),
     }
 }
 
@@ -38,7 +41,12 @@ async fn test_app(mock_api_url: &str) -> axum::Router {
         .expect("failed to run migrations");
 
     let config = Arc::new(test_config(mock_api_url));
-    let state = AppState { db: pool, config };
+    let oauth_flows = Arc::new(Mutex::new(HashMap::new()));
+    let state = AppState {
+        db: pool,
+        config,
+        oauth_flows,
+    };
     build_router(state)
 }
 
@@ -182,9 +190,11 @@ async fn test_app_with_state(mock_api_url: &str) -> (AppState, axum::Router) {
         .expect("failed to run migrations");
 
     let config = Arc::new(test_config(mock_api_url));
+    let oauth_flows = Arc::new(Mutex::new(HashMap::new()));
     let state = AppState {
         db: pool,
         config: config.clone(),
+        oauth_flows,
     };
     let router = build_router(state.clone());
     (state, router)

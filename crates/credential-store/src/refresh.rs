@@ -1,13 +1,28 @@
 use async_trait::async_trait;
 
-use crate::error::Result;
+use crate::error::{CredentialStoreError, Result};
 use crate::types::TokenResponse;
 
-/// Trait for refreshing OAuth tokens. The server implements this with reqwest;
-/// tests provide a mock implementation.
+/// Trait for refreshing OAuth tokens and minting service account tokens.
+/// The server implements this with reqwest; tests provide a mock implementation.
 #[async_trait]
 pub trait TokenRefresher: Send + Sync {
     async fn refresh_token(&self, provider: &str, refresh_token: &str) -> Result<TokenResponse>;
+
+    /// Mint a short-lived access token from a service account private key via JWT signing.
+    /// Default implementation returns an error — only the server's reqwest-backed
+    /// implementation provides real JWT minting.
+    async fn mint_service_account_token(
+        &self,
+        _private_key_pem: &str,
+        _client_email: &str,
+        _token_uri: &str,
+        _scopes: &str,
+    ) -> Result<TokenResponse> {
+        Err(CredentialStoreError::ServiceAccountError(
+            "service account token minting not supported by this refresher".into(),
+        ))
+    }
 }
 
 /// Returns true if the token is expired or within 60 seconds of expiring.

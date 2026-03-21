@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
+use edgeclaw_server::oauth;
 use edgeclaw_server::scheduler::Scheduler;
 use edgeclaw_server::server::{build_router, AppState, ServerConfig};
 
@@ -32,7 +34,15 @@ async fn main() -> Result<()> {
     let sched = Scheduler::new(pool.clone(), config.clone());
     sched.start();
 
-    let state = AppState { db: pool, config };
+    // Initialize OAuth flow state and cleanup
+    let oauth_flows = Arc::new(Mutex::new(HashMap::new()));
+    oauth::spawn_flow_cleanup(oauth_flows.clone());
+
+    let state = AppState {
+        db: pool,
+        config,
+        oauth_flows,
+    };
 
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;

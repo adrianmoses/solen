@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// The type of credential stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialType {
+    OAuth,
+    ServiceAccount,
+}
+
+/// Metadata for a Google service account credential.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAccountMetadata {
+    pub client_email: String,
+    pub token_uri: String,
+}
+
 /// Decrypted credential, held in memory. Sensitive fields are zeroized on drop.
 #[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct Credential {
@@ -16,6 +31,10 @@ pub struct Credential {
     pub scopes: String,
     #[zeroize(skip)]
     pub expires_at: Option<i64>,
+    #[zeroize(skip)]
+    pub credential_type: CredentialType,
+    #[zeroize(skip)]
+    pub metadata: Option<ServiceAccountMetadata>,
 }
 
 /// Raw encrypted row from the database.
@@ -31,6 +50,8 @@ pub struct CredentialRow {
     pub user_salt: Vec<u8>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub credential_type: String,
+    pub metadata_enc: Option<Vec<u8>>,
 }
 
 /// Metadata-only view of a credential (no tokens).
@@ -40,6 +61,7 @@ pub struct CredentialSummary {
     pub provider: String,
     pub scopes: String,
     pub expires_at: Option<i64>,
+    pub credential_type: String,
 }
 
 /// Deserialized token response from an OAuth provider.

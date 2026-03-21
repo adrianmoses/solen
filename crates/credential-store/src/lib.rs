@@ -7,4 +7,6 @@ pub mod types;
 pub use error::CredentialStoreError;
 pub use refresh::{is_expired, TokenRefresher};
 pub use store::CredentialStore;
-pub use types::{Credential, CredentialSummary, TokenResponse};
+pub use types::{
+    Credential, CredentialSummary, CredentialType, ServiceAccountMetadata, TokenResponse,
+};

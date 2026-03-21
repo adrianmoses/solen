@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -8,6 +9,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::handlers;
+use crate::oauth::{OAuthFlows, ProviderConfig};
 
 pub struct ServerConfig {
     pub database_url: String,
@@ -18,6 +20,8 @@ pub struct ServerConfig {
     pub anthropic_base_url: String,
     pub max_tasks_per_user: i64,
     pub token_master_key: Option<[u8; 32]>,
+    pub providers: HashMap<String, ProviderConfig>,
+    pub oauth_redirect_uri: String,
 }
 
 impl ServerConfig {
@@ -61,7 +65,53 @@ impl ServerConfig {
                     }
                 }
             },
+            providers: Self::load_providers(),
+            oauth_redirect_uri: std::env::var("OAUTH_REDIRECT_URI")
+                .unwrap_or_else(|_| "http://localhost:8080/oauth/callback".to_string()),
         }
+    }
+
+    fn load_providers() -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+
+        if let (Ok(id), Ok(secret)) = (
+            std::env::var("GITHUB_CLIENT_ID"),
+            std::env::var("GITHUB_CLIENT_SECRET"),
+        ) {
+            providers.insert(
+                "github".to_string(),
+                ProviderConfig {
+                    client_id: id,
+                    client_secret: secret,
+                    auth_url: "https://github.com/login/oauth/authorize".to_string(),
+                    token_url: "https://github.com/login/oauth/access_token".to_string(),
+                    default_scopes: "repo,user:email".to_string(),
+                    extra_auth_params: vec![],
+                },
+            );
+        }
+
+        if let (Ok(id), Ok(secret)) = (
+            std::env::var("GOOGLE_CLIENT_ID"),
+            std::env::var("GOOGLE_CLIENT_SECRET"),
+        ) {
+            providers.insert(
+                "google".to_string(),
+                ProviderConfig {
+                    client_id: id,
+                    client_secret: secret,
+                    auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    default_scopes: String::new(),
+                    extra_auth_params: vec![
+                        ("access_type".to_string(), "offline".to_string()),
+                        ("prompt".to_string(), "consent".to_string()),
+                    ],
+                },
+            );
+        }
+
+        providers
     }
 
     pub fn bind_addr(&self) -> String {
@@ -73,6 +123,7 @@ impl ServerConfig {
 pub struct AppState {
     pub db: SqlitePool,
     pub config: Arc<ServerConfig>,
+    pub oauth_flows: OAuthFlows,
 }
 
 #[derive(Serialize)]
@@ -96,5 +147,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/schedule", post(handlers::schedule_task_handler))
         .route("/tasks", get(handlers::list_tasks_handler))
         .route("/tasks/{id}", delete(handlers::delete_task_handler))
+        .route("/oauth/start", post(handlers::oauth_start_handler))
+        .route("/oauth/callback", get(handlers::oauth_callback_handler))
+        .route(
+            "/credentials/import-service-account",
+            post(handlers::import_service_account_handler),
+        )
         .with_state(state)
 }

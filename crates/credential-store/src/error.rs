@@ -25,6 +25,9 @@ pub enum CredentialStoreError {
 
     #[error("credential invalid: {0}")]
     CredentialInvalid(String),
+
+    #[error("service account error: {0}")]
+    ServiceAccountError(String),
 }
 
 pub type Result<T> = std::result::Result<T, CredentialStoreError>;
