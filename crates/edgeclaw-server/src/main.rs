@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use agent_core::ReqwestBackend;
 use anyhow::Result;
 use skill_registry::SkillRegistry;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -24,12 +24,17 @@ async fn main() -> Result<()> {
     let config = ServerConfig::from_env();
     let bind_addr = config.bind_addr();
 
+    let connect_options: SqliteConnectOptions = config
+        .database_url
+        .parse::<SqliteConnectOptions>()?
+        .create_if_missing(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(&config.database_url)
+        .connect_with(connect_options)
         .await?;
 
     sqlx::migrate!().run(&pool).await?;
+    tracing::info!("database ready");
 
     // Auto-register configured MCP skills
     if !config.skill_configs.is_empty() {

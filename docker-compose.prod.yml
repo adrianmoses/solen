@@ -1,0 +1,6 @@
+# Production override — use pre-built GHCR image instead of building locally.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  agent:
+    image: ghcr.io/adrianmoses/edgeclaw:latest
+    build: !reset null

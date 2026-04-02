@@ -1,3 +1,5 @@
+# DEPRECATED: Use docker/Dockerfile.server instead (cargo-chef cached builds, Alpine, non-root user).
+# This file is kept for quick local builds only.
 FROM rust:1.83-slim AS builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*

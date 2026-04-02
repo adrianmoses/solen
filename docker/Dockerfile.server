@@ -1,0 +1,41 @@
+# Stage 1: cargo-chef planner — computes the dependency recipe
+FROM rust:1.88-alpine AS chef
+WORKDIR /app
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+RUN cargo install cargo-chef
+
+FROM chef AS planner
+COPY . .
+# Strip WASM skill crates from workspace (they depend on `worker` and can't build natively)
+RUN sed -i '/"skills\/skill-/d; /"skills\/mcp-server-util"/d' Cargo.toml
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 2: dependency cache — only rebuilt when Cargo.toml/Cargo.lock change
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Stage 3: actual build — fast when only src/ changed
+COPY . .
+RUN sed -i '/"skills\/skill-/d; /"skills\/mcp-server-util"/d' Cargo.toml
+RUN cargo build --release --bin edgeclaw-server
+RUN strip /app/target/release/edgeclaw-server
+
+# Stage 4: minimal runtime image
+FROM alpine:3.21 AS runtime
+RUN apk add --no-cache ca-certificates curl su-exec
+RUN addgroup -S edgeclaw && adduser -S edgeclaw -G edgeclaw
+
+COPY --from=builder /app/target/release/edgeclaw-server /usr/local/bin/
+# Copy SKILL.md files for system prompt injection (preserve directory structure)
+COPY --from=builder /app/skills/ /app/skills/
+
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+RUN mkdir -p /data && chown edgeclaw:edgeclaw /data
+VOLUME ["/data"]
+
+EXPOSE 8080
+ENTRYPOINT ["entrypoint.sh"]
+CMD ["edgeclaw-server"]

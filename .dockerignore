@@ -1,0 +1,15 @@
+target/
+.git/
+.env
+.env.*
+!.env.example
+edgeclaw.db
+edgeclaw-dev.db
+docs/
+tests/
+README.md
+EDGECLAW_SPEC.md
+EDGECLAW_CREDENTIALS_SPEC.md
+EDGECLAW_TUI_SPEC.md
+EDGECLAW_VPS_MIGRATION.md
+CLAUDE.md
