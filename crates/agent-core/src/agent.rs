@@ -118,9 +118,7 @@ impl<H: HttpBackend> Agent<H> {
 
                 StopReason::MaxTokens => {
                     if continuations_used >= self.max_continuations {
-                        return Err(AgentError::MaxContinuationsExceeded(
-                            self.max_continuations,
-                        ));
+                        return Err(AgentError::MaxContinuationsExceeded(self.max_continuations));
                     }
                     continuations_used += 1;
                     let continue_msg = Message {
@@ -332,10 +330,7 @@ mod tests {
     #[cfg_attr(not(feature = "native"), async_trait(?Send))]
     impl ToolExecutor for MockToolExecutor {
         async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
-            self.call_log
-                .lock()
-                .unwrap()
-                .push(tool_call.clone());
+            self.call_log.lock().unwrap().push(tool_call.clone());
             if self.error_tools.contains(&tool_call.name) {
                 return Err(AgentError::ToolExecutionFailed(format!(
                     "{} failed",
@@ -388,8 +383,7 @@ mod tests {
             api_key: "test-key".to_string(),
             ..LlmConfig::default()
         };
-        Agent::new(LlmClient::new(config, backend))
-            .with_tool_executor(Arc::new(executor))
+        Agent::new(LlmClient::new(config, backend)).with_tool_executor(Arc::new(executor))
     }
 
     fn empty_ctx() -> AgentContext {
@@ -564,8 +558,7 @@ mod tests {
         let executor = MockToolExecutor::new();
 
         // ToolUse → ToolUse → EndTurn (3 LLM calls, 2 tool executions)
-        let agent =
-            make_agent_with_executor(vec![tool_use, tool_use, end_turn], executor);
+        let agent = make_agent_with_executor(vec![tool_use, tool_use, end_turn], executor);
         let result = agent.run(empty_ctx(), "Do two things").await.unwrap();
 
         assert_eq!(
@@ -664,8 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prompt_too_long_error() {
-        let error_response =
-            include_str!("../../../tests/fixtures/prompt_too_long_error.json");
+        let error_response = include_str!("../../../tests/fixtures/prompt_too_long_error.json");
 
         let agent = make_agent(vec![error_response]);
         let err = agent.run(empty_ctx(), "Hi").await.unwrap_err();
@@ -680,10 +672,7 @@ mod tests {
         let executor = MockToolExecutor::new();
 
         // MaxTokens → continue → ToolUse (inline) → EndTurn
-        let agent = make_agent_with_executor(
-            vec![max_tokens, tool_use, end_turn],
-            executor,
-        );
+        let agent = make_agent_with_executor(vec![max_tokens, tool_use, end_turn], executor);
         let result = agent.run(empty_ctx(), "Hi").await.unwrap();
 
         assert_eq!(
@@ -714,8 +703,8 @@ mod tests {
         let multi_tool = include_str!("../../../tests/fixtures/multi_tool_use_response.json");
         let end_turn = include_str!("../../../tests/fixtures/end_turn_response.json");
         // Both tools marked concurrent-safe
-        let executor = MockToolExecutor::new()
-            .with_concurrent_tools(vec!["web_search", "http_fetch"]);
+        let executor =
+            MockToolExecutor::new().with_concurrent_tools(vec!["web_search", "http_fetch"]);
 
         let agent = make_agent_with_executor(vec![multi_tool, end_turn], executor);
         let result = agent.run(empty_ctx(), "Search and fetch").await.unwrap();
@@ -735,8 +724,7 @@ mod tests {
         let multi_tool = include_str!("../../../tests/fixtures/multi_tool_use_response.json");
         let end_turn = include_str!("../../../tests/fixtures/end_turn_response.json");
         // Only web_search is concurrent, http_fetch is serial
-        let executor = MockToolExecutor::new()
-            .with_concurrent_tools(vec!["web_search"]);
+        let executor = MockToolExecutor::new().with_concurrent_tools(vec!["web_search"]);
 
         let agent = make_agent_with_executor(vec![multi_tool, end_turn], executor);
         let result = agent.run(empty_ctx(), "Search and fetch").await.unwrap();

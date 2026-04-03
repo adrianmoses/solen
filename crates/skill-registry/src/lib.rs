@@ -180,9 +180,7 @@ pub fn is_destructive(tool_name: &str) -> bool {
     DESTRUCTIVE_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
-        || DESTRUCTIVE_EXPLICIT
-            .iter()
-            .any(|name| lower.contains(name))
+        || DESTRUCTIVE_EXPLICIT.iter().any(|name| lower.contains(name))
 }
 
 #[cfg(feature = "native")]
