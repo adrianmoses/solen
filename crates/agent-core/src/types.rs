@@ -27,6 +27,9 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    CompactBoundary {
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +60,27 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+impl ToolResult {
+    /// Create an error result for a failed tool execution.
+    pub fn error_for(tool_use_id: String, err: impl std::fmt::Display) -> Self {
+        Self {
+            tool_use_id,
+            content: format!("Tool execution error: {err}"),
+            is_error: true,
+        }
+    }
+}
+
+impl From<ToolResult> for ContentBlock {
+    fn from(r: ToolResult) -> Self {
+        ContentBlock::ToolResult {
+            tool_use_id: r.tool_use_id,
+            content: r.content,
+            is_error: r.is_error,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentContext {
     pub system_prompt: String,
@@ -68,12 +92,34 @@ pub struct AgentContext {
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
+
+    /// Return true if this tool call requires human approval before execution.
+    /// Default: false (all tools are safe to execute inline).
+    fn needs_approval(&self, _tool_call: &ToolCall) -> bool {
+        false
+    }
+
+    /// Return true if this tool can safely run concurrently with other tools.
+    /// Default: false (sequential execution).
+    fn is_concurrent_safe(&self, _tool_call: &ToolCall) -> bool {
+        false
+    }
 }
 
 #[cfg(not(feature = "native"))]
 #[async_trait(?Send)]
 pub trait ToolExecutor {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
+
+    /// Return true if this tool call requires human approval before execution.
+    fn needs_approval(&self, _tool_call: &ToolCall) -> bool {
+        false
+    }
+
+    /// Return true if this tool can safely run concurrently with other tools.
+    fn is_concurrent_safe(&self, _tool_call: &ToolCall) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,4 +127,55 @@ pub struct AgentRunResult {
     pub new_messages: Vec<Message>,
     pub answer: Option<String>,
     pub pending_tool_calls: Vec<ToolCall>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compact_boundary_serde_roundtrip() {
+        let block = ContentBlock::CompactBoundary {
+            summary: "Conversation summary here.".to_string(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"compact_boundary\""));
+        assert!(json.contains("\"summary\":\"Conversation summary here.\""));
+
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            ContentBlock::CompactBoundary { summary } => {
+                assert_eq!(summary, "Conversation summary here.");
+            }
+            _ => panic!("Expected CompactBoundary variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_executor_default_methods() {
+        // Verify a minimal ToolExecutor impl compiles with only execute()
+        struct MinimalExecutor;
+
+        #[cfg_attr(feature = "native", async_trait)]
+        #[cfg_attr(not(feature = "native"), async_trait(?Send))]
+        impl ToolExecutor for MinimalExecutor {
+            async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
+                Ok(ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                })
+            }
+            // needs_approval and is_concurrent_safe use defaults
+        }
+
+        let executor = MinimalExecutor;
+        let tc = ToolCall {
+            id: "1".to_string(),
+            name: "test".to_string(),
+            input: serde_json::json!({}),
+        };
+        assert!(!executor.needs_approval(&tc));
+        assert!(!executor.is_concurrent_safe(&tc));
+    }
 }

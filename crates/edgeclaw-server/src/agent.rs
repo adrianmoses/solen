@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use agent_core::{
     Agent, AgentContext, ContentBlock, LlmClient, LlmConfig, Message, ReqwestBackend, Role,
     ToolCall, ToolExecutor, ToolResult,
@@ -7,39 +9,6 @@ use skill_registry::{SkillRegistry, SkillRow};
 use sqlx::SqlitePool;
 
 use crate::server::ServerConfig;
-
-// --- Destructive tool detection (ported from worker) ---
-
-const DESTRUCTIVE_PATTERNS: &[&str] = &["delete", "remove", "send", "drop"];
-const DESTRUCTIVE_EXPLICIT: &[&str] = &[
-    "create_pull_request",
-    "merge_pull_request",
-    "issue_write",
-    "manage_event",
-    "create_or_update_file",
-    "push_files",
-];
-
-fn is_destructive(tool_name: &str) -> bool {
-    let lower = tool_name.to_lowercase();
-    DESTRUCTIVE_PATTERNS
-        .iter()
-        .any(|pattern| lower.contains(pattern))
-        || DESTRUCTIVE_EXPLICIT.iter().any(|name| lower.contains(name))
-}
-
-fn check_destructive(tool_calls: &[ToolCall]) -> (Vec<ToolCall>, Vec<ToolCall>) {
-    let mut safe = Vec::new();
-    let mut destructive = Vec::new();
-    for tc in tool_calls {
-        if is_destructive(&tc.name) {
-            destructive.push(tc.clone());
-        } else {
-            safe.push(tc.clone());
-        }
-    }
-    (safe, destructive)
-}
 
 fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -227,8 +196,11 @@ pub async fn run_agent_turn(
     let registry = build_registry(skill_rows)?;
     let tools = registry.all_tools();
 
+    // Agent with inline tool execution — safe tools run inside the loop,
+    // destructive tools break out as pending_tool_calls via needs_approval().
+    let executor: Arc<dyn ToolExecutor> = Arc::new(registry);
     let llm = LlmClient::new(llm_config, ReqwestBackend::new());
-    let agent = Agent::new(llm);
+    let agent = Agent::new(llm).with_tool_executor(executor.clone());
 
     let ctx = AgentContext {
         system_prompt,
@@ -236,65 +208,20 @@ pub async fn run_agent_turn(
         tools,
     };
 
-    let mut result = agent.run(ctx, user_message).await?;
+    let result = agent.run(ctx, user_message).await?;
     persist_messages(pool, user_id, &result.new_messages).await;
 
-    // Tool execution loop
-    while !result.pending_tool_calls.is_empty() {
-        let (safe_calls, destructive_calls) = check_destructive(&result.pending_tool_calls);
-
-        // Persist destructive calls as pending approvals
-        if !destructive_calls.is_empty() {
-            for tc in &destructive_calls {
-                persist_pending_approval(pool, user_id, tc).await;
-            }
-
-            if safe_calls.is_empty() {
-                return Ok(serde_json::json!({
-                    "status": "awaiting_approval",
-                    "answer": result.answer,
-                    "pending_approvals": destructive_calls,
-                }));
-            }
+    // The agent loop now handles safe tools inline. Only destructive tools
+    // (where SkillRegistry::needs_approval returns true) appear here.
+    if !result.pending_tool_calls.is_empty() {
+        for tc in &result.pending_tool_calls {
+            persist_pending_approval(pool, user_id, tc).await;
         }
-
-        // Execute safe tool calls
-        let mut tool_results = Vec::new();
-        for tc in &safe_calls {
-            let tr = registry.execute(tc).await.unwrap_or_else(|e| ToolResult {
-                tool_use_id: tc.id.clone(),
-                content: format!("Tool execution error: {e}"),
-                is_error: true,
-            });
-            tool_results.push(tr);
-        }
-
-        // For destructive calls that were deferred
-        for tc in &destructive_calls {
-            tool_results.push(ToolResult {
-                tool_use_id: tc.id.clone(),
-                content: "This tool call requires human approval and is pending.".to_string(),
-                is_error: true,
-            });
-        }
-
-        // Reload context and resume
-        let messages = load_messages(pool, user_id, 50).await;
-        let system_prompt = load_system_prompt(pool, user_id).await;
-        let tools = registry.all_tools();
-        let llm_config = build_llm_config(config);
-
-        let llm = LlmClient::new(llm_config, ReqwestBackend::new());
-        let agent = Agent::new(llm);
-
-        let ctx = AgentContext {
-            system_prompt,
-            messages,
-            tools,
-        };
-
-        result = agent.resume(ctx, tool_results).await?;
-        persist_messages(pool, user_id, &result.new_messages).await;
+        return Ok(serde_json::json!({
+            "status": "awaiting_approval",
+            "answer": result.answer,
+            "pending_approvals": result.pending_tool_calls,
+        }));
     }
 
     Ok(serde_json::json!({
@@ -342,14 +269,12 @@ pub async fn handle_approval(
     let registry = build_registry(skill_rows)?;
     let tools = registry.all_tools();
 
-    let tool_result = registry
+    let executor: Arc<dyn ToolExecutor> = Arc::new(registry);
+
+    let tool_result = executor
         .execute(&tool_call)
         .await
-        .unwrap_or_else(|e| ToolResult {
-            tool_use_id: tool_call.id.clone(),
-            content: format!("Tool execution error: {e}"),
-            is_error: true,
-        });
+        .unwrap_or_else(|e| ToolResult::error_for(tool_call.id.clone(), e));
 
     let ctx = AgentContext {
         system_prompt,
@@ -358,10 +283,22 @@ pub async fn handle_approval(
     };
 
     let llm = LlmClient::new(llm_config, ReqwestBackend::new());
-    let agent = Agent::new(llm);
+    let agent = Agent::new(llm).with_tool_executor(executor);
 
     let agent_result = agent.resume(ctx, vec![tool_result]).await?;
     persist_messages(pool, user_id, &agent_result.new_messages).await;
+
+    // If more destructive tools surface, persist them
+    if !agent_result.pending_tool_calls.is_empty() {
+        for tc in &agent_result.pending_tool_calls {
+            persist_pending_approval(pool, user_id, tc).await;
+        }
+        return Ok(serde_json::json!({
+            "status": "awaiting_approval",
+            "answer": agent_result.answer,
+            "pending_approvals": agent_result.pending_tool_calls,
+        }));
+    }
 
     Ok(serde_json::json!({
         "status": "approved",

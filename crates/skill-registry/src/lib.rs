@@ -152,19 +152,35 @@ impl<H: HttpBackend> SkillRegistry<H> {
             .find(|s| s.name == skill_name)
             .ok_or_else(|| AgentError::SkillNotFound(skill_name.to_string()))?;
 
-        let inner_call = ToolCall {
-            id: tool_call.id.clone(),
-            name: tool_name.to_string(),
-            input: tool_call.input.clone(),
-        };
-
         let mut result = skill
             .client
             .call_tool(tool_name, tool_call.input.clone())
             .await?;
-        result.tool_use_id = inner_call.id;
+        result.tool_use_id = tool_call.id.clone();
         Ok(result)
     }
+}
+
+/// Patterns in tool names that indicate a destructive/side-effectful action.
+const DESTRUCTIVE_PATTERNS: &[&str] = &["delete", "remove", "send", "drop"];
+
+/// Explicit tool names known to be destructive.
+const DESTRUCTIVE_EXPLICIT: &[&str] = &[
+    "create_pull_request",
+    "merge_pull_request",
+    "issue_write",
+    "manage_event",
+    "create_or_update_file",
+    "push_files",
+];
+
+/// Check if a tool name matches destructive patterns.
+pub fn is_destructive(tool_name: &str) -> bool {
+    let lower = tool_name.to_lowercase();
+    DESTRUCTIVE_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+        || DESTRUCTIVE_EXPLICIT.iter().any(|name| lower.contains(name))
 }
 
 #[cfg(feature = "native")]
@@ -172,6 +188,10 @@ impl<H: HttpBackend> SkillRegistry<H> {
 impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
         self.dispatch(tool_call).await
+    }
+
+    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
+        is_destructive(&tool_call.name)
     }
 }
 
@@ -181,11 +201,27 @@ impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
         self.dispatch(tool_call).await
     }
+
+    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
+        is_destructive(&tool_call.name)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_destructive() {
+        assert!(is_destructive("gmail__send_email"));
+        assert!(is_destructive("github__delete_branch"));
+        assert!(is_destructive("github__create_pull_request"));
+        assert!(is_destructive("db__drop_table"));
+        assert!(is_destructive("files__remove_file"));
+        assert!(!is_destructive("websearch__search"));
+        assert!(!is_destructive("memory__store"));
+        assert!(!is_destructive("http__fetch"));
+    }
     use agent_core::HttpBackend;
     use async_trait::async_trait;
     use std::collections::VecDeque;

@@ -28,4 +28,10 @@ pub enum AgentError {
 
     #[error("Skill not found: {0}")]
     SkillNotFound(String),
+
+    #[error("Prompt too long, compaction required")]
+    PromptTooLong,
+
+    #[error("Max continuation attempts ({0}) exceeded")]
+    MaxContinuationsExceeded(u32),
 }

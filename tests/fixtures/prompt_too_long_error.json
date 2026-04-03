@@ -1,0 +1,6 @@
+{
+  "error": {
+    "type": "invalid_request_error",
+    "message": "prompt is too long: 204801 tokens > 200000 maximum"
+  }
+}
