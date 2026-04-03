@@ -1,0 +1,9 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Here is a partial response that was cut off due to"
+    }
+  ],
+  "stop_reason": "max_tokens"
+}
