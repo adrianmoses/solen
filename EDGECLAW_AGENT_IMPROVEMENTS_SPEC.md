@@ -207,9 +207,18 @@ the agent needs without external skill dependencies.
 | `file_edit` | Apply string replacements to files | No |
 | `glob` | Find files by pattern | Yes |
 | `grep` | Search file contents with regex | Yes |
+| `memory_store` | Store a fact (key/value with optional tags) | Yes |
+| `memory_fetch` | Retrieve facts by key or tags | Yes |
+| `memory_list` | List stored facts for the user | Yes |
+| `memory_delete` | Remove a fact by key | No |
 | `spawn_agent` | Fork a sub-agent (see §3) | Yes |
 | `send_message` | Send message to running agent (see §3) | Yes |
 | `stop_agent` | Kill a running agent (see §3) | No |
+
+Memory tools query the `memory_facts` table directly via the database pool —
+no MCP round-trip. This makes memory a core capability that works without
+external skill containers. The `skill-memory` MCP service can be retired once
+built-in memory tools are implemented.
 
 **Implementation:** A new `BuiltinExecutor` that implements `ToolExecutor` and
 wraps both built-in tools and the existing `SkillRegistry` for MCP tools:
@@ -484,13 +493,13 @@ conversations.
   "name": "memory_consolidation",
   "cron": "0 3 * * *",
   "payload": {
-    "message": "Review conversations from the last 24 hours. Extract durable facts about the user (preferences, context, decisions). Store new facts via the memory skill. Update facts that have changed. Remove facts that are contradicted by newer information."
+    "message": "Review conversations from the last 24 hours. Extract durable facts about the user (preferences, context, decisions). Store new facts via the memory tools. Update facts that have changed. Remove facts that are contradicted by newer information."
   }
 }
 ```
 
 **Consolidation agent** gets access to:
-- `memory__store`, `memory__fetch`, `memory__list`, `memory__delete` tools
+- `memory_store`, `memory_fetch`, `memory_list`, `memory_delete` built-in tools
 - Read-only access to recent messages (injected as context)
 - A system prompt tuned for fact extraction (not general assistance)
 
