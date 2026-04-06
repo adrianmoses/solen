@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use agent_core::{
-    Agent, AgentContext, ContentBlock, LlmClient, LlmConfig, Message, ReqwestBackend, Role,
-    ToolCall, ToolExecutor, ToolResult,
+    Agent, AgentContext, ContentBlock, LlmClient, LlmConfig, Message, PolicyChain, ReqwestBackend,
+    Role, ToolCall, ToolExecutor, ToolResult,
 };
 use serde_json::Value;
 use skill_registry::{SkillRegistry, SkillRow};
 use sqlx::SqlitePool;
 
+use crate::builtin_executor::BuiltinExecutor;
 use crate::server::ServerConfig;
 
-fn now_millis() -> i64 {
+pub fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
@@ -194,11 +195,16 @@ pub async fn run_agent_turn(
 
     let llm_config = build_llm_config(config);
     let registry = build_registry(skill_rows)?;
-    let tools = registry.all_tools();
 
-    // Agent with inline tool execution — safe tools run inside the loop,
-    // destructive tools break out as pending_tool_calls via needs_approval().
-    let executor: Arc<dyn ToolExecutor> = Arc::new(registry);
+    // BuiltinExecutor composes built-in tools + MCP skills + permission policy
+    let executor = BuiltinExecutor::new(
+        pool.clone(),
+        user_id.to_string(),
+        registry,
+        PolicyChain::default_chain(),
+    );
+    let tools = executor.all_tools();
+    let executor: Arc<dyn ToolExecutor> = Arc::new(executor);
     let llm = LlmClient::new(llm_config, ReqwestBackend::new());
     let agent = Agent::new(llm).with_tool_executor(executor.clone());
 
@@ -267,9 +273,14 @@ pub async fn handle_approval(
     let llm_config = build_llm_config(config);
 
     let registry = build_registry(skill_rows)?;
-    let tools = registry.all_tools();
-
-    let executor: Arc<dyn ToolExecutor> = Arc::new(registry);
+    let executor = BuiltinExecutor::new(
+        pool.clone(),
+        user_id.to_string(),
+        registry,
+        PolicyChain::default_chain(),
+    );
+    let tools = executor.all_tools();
+    let executor: Arc<dyn ToolExecutor> = Arc::new(executor);
 
     let tool_result = executor
         .execute(&tool_call)

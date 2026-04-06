@@ -69,6 +69,32 @@ impl ToolResult {
             is_error: true,
         }
     }
+
+    /// Create a success result (for built-in tools; caller sets `tool_use_id`).
+    pub fn ok(content: impl Into<String>) -> Self {
+        Self {
+            tool_use_id: String::new(),
+            content: content.into(),
+            is_error: false,
+        }
+    }
+
+    /// Create an error result (for built-in tools; caller sets `tool_use_id`).
+    pub fn err(content: impl Into<String>) -> Self {
+        Self {
+            tool_use_id: String::new(),
+            content: content.into(),
+            is_error: true,
+        }
+    }
+
+    /// Extract a required string field from JSON input, or return an error result.
+    pub fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, Self> {
+        input
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Self::err(format!("Missing required field: {field}")))
+    }
 }
 
 impl From<ToolResult> for ContentBlock {
