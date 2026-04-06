@@ -368,9 +368,10 @@ async fn test_approvals_empty() {
 
 #[tokio::test]
 async fn test_message_tool_use_then_end_turn() {
-    // Mock returns tool_use on first call, then end_turn on second.
-    // The tool "web_search" has no registered skill, so tool execution errors,
-    // but the agent loop resumes and the LLM returns end_turn.
+    // Mock returns tool_use on first call. The tool "web_search" is an
+    // unregistered MCP tool, so the permission policy chain flags it as
+    // RequiresApproval (unknown tool). The agent loop breaks out with
+    // pending_tool_calls and status "awaiting_approval".
     let mock_url = mock_anthropic_server(vec![TOOL_USE, END_TURN]).await;
     let app = test_app(&mock_url).await;
 
@@ -387,8 +388,10 @@ async fn test_message_tool_use_then_end_turn() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
-    // After tool error + resume, the LLM returns end_turn with an answer
-    assert_eq!(body["answer"], "Hello! How can I help you today?");
+    // Unknown MCP tools require approval under the new permission policy
+    assert_eq!(body["status"], "awaiting_approval");
+    assert!(body["pending_approvals"].is_array());
+    assert_eq!(body["pending_approvals"][0]["name"], "web_search");
 }
 
 #[tokio::test]
