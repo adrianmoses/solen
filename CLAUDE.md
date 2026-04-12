@@ -31,12 +31,11 @@ docker compose up --build
 - The `HttpBackend` trait in agent-core abstracts HTTP calls — server implements it with `reqwest`, tests use `MockHttpBackend`.
 - Skills are isolated HTTP services deployed as Docker containers.
 
-## Specs
+## Specs & Roadmap
 
-- **`EDGECLAW_SPEC.md`** — canonical architecture spec (VPS/tokio/axum/sqlx)
-- **`EDGECLAW_CREDENTIALS_SPEC.md`** — credential encryption, OAuth PKCE, skill installation
+- **`ROADMAP.md`** — focused roadmap: CLI/TUI, Agent Soul, Sub-agents
 - **`EDGECLAW_TUI_SPEC.md`** — CLI setup wizard and management TUI
-- **`docs/archive/`** — historical Cloudflare Workers/Durable Objects specs (pre-migration)
+- **`docs/archive/`** — archived specs: Architecture, Credentials, Agent Improvements, Temporal KG, VPS Migration, Cloudflare Workers (pre-migration)
 
 ## Testing Patterns
 
