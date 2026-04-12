@@ -148,6 +148,7 @@ impl<H: HttpBackend> Agent<H> {
 
                     let executor = match &self.tool_executor {
                         None => {
+                            // No executor: return all tool calls to the harness
                             return Ok(AgentRunResult {
                                 new_messages,
                                 answer: None,
@@ -157,19 +158,9 @@ impl<H: HttpBackend> Agent<H> {
                         Some(e) => e.clone(),
                     };
 
-                    let (safe, needs_approval): (Vec<_>, Vec<_>) = tool_calls
-                        .into_iter()
-                        .partition(|tc| !executor.needs_approval(tc));
-
-                    if safe.is_empty() {
-                        return Ok(AgentRunResult {
-                            new_messages,
-                            answer: None,
-                            pending_tool_calls: needs_approval,
-                        });
-                    }
-
-                    let results = execute_tools(&executor, safe).await;
+                    // Execute ALL tools unconditionally. Permission checks
+                    // are the harness's responsibility, not the agent loop's.
+                    let results = execute_tools(&executor, tool_calls).await;
 
                     let tool_result_msg = Message {
                         role: Role::User,
@@ -178,15 +169,6 @@ impl<H: HttpBackend> Agent<H> {
                     };
                     ctx.messages.push(tool_result_msg.clone());
                     new_messages.push(tool_result_msg);
-
-                    // Safe results persisted; break out if any still need approval
-                    if !needs_approval.is_empty() {
-                        return Ok(AgentRunResult {
-                            new_messages,
-                            answer: None,
-                            pending_tool_calls: needs_approval,
-                        });
-                    }
 
                     continue;
                 }
@@ -289,7 +271,6 @@ mod tests {
     // --- Mock Tool Executor ---
 
     struct MockToolExecutor {
-        approval_tools: HashSet<String>,
         concurrent_tools: HashSet<String>,
         call_log: Mutex<Vec<ToolCall>>,
         error_tools: HashSet<String>,
@@ -299,16 +280,10 @@ mod tests {
     impl MockToolExecutor {
         fn new() -> Self {
             Self {
-                approval_tools: HashSet::new(),
                 concurrent_tools: HashSet::new(),
                 call_log: Mutex::new(Vec::new()),
                 error_tools: HashSet::new(),
             }
-        }
-
-        fn with_approval_tools(mut self, tools: Vec<&str>) -> Self {
-            self.approval_tools = tools.into_iter().map(String::from).collect();
-            self
         }
 
         fn with_concurrent_tools(mut self, tools: Vec<&str>) -> Self {
@@ -342,10 +317,6 @@ mod tests {
                 content: format!("Result for {}", tool_call.name),
                 is_error: false,
             })
-        }
-
-        fn needs_approval(&self, tool_call: &ToolCall) -> bool {
-            self.approval_tools.contains(&tool_call.name)
         }
 
         fn is_concurrent_safe(&self, tool_call: &ToolCall) -> bool {
@@ -499,56 +470,6 @@ mod tests {
         assert!(result.pending_tool_calls.is_empty());
         // Messages: user, assistant(tool_use), user(tool_result), assistant(end_turn)
         assert_eq!(result.new_messages.len(), 4);
-    }
-
-    #[tokio::test]
-    async fn test_run_needs_approval() {
-        let tool_use = include_str!("../../../tests/fixtures/tool_use_response.json");
-        let executor = MockToolExecutor::new().with_approval_tools(vec!["web_search"]);
-
-        let agent = make_agent_with_executor(vec![tool_use], executor);
-        let result = agent.run(empty_ctx(), "Search").await.unwrap();
-
-        // web_search needs approval → breaks out
-        assert!(result.answer.is_none());
-        assert_eq!(result.pending_tool_calls.len(), 1);
-        assert_eq!(result.pending_tool_calls[0].name, "web_search");
-    }
-
-    #[tokio::test]
-    async fn test_run_mixed_safe_and_approval() {
-        let multi_tool = include_str!("../../../tests/fixtures/multi_tool_use_response.json");
-        // http_fetch needs approval, web_search is safe
-        let executor = MockToolExecutor::new().with_approval_tools(vec!["http_fetch"]);
-
-        let agent = make_agent_with_executor(vec![multi_tool], executor);
-        let result = agent.run(empty_ctx(), "Search and fetch").await.unwrap();
-
-        // web_search executed inline, http_fetch returned as pending
-        assert!(result.answer.is_none());
-        assert_eq!(result.pending_tool_calls.len(), 1);
-        assert_eq!(result.pending_tool_calls[0].name, "http_fetch");
-
-        // Messages should include the tool result for web_search
-        // user, assistant(tool_use x2), user(tool_result for web_search)
-        assert_eq!(result.new_messages.len(), 3);
-
-        // Verify tool result message contains web_search result
-        let tool_result_msg = &result.new_messages[2];
-        assert_eq!(tool_result_msg.role, Role::User);
-        assert_eq!(tool_result_msg.content.len(), 1);
-        match &tool_result_msg.content[0] {
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                assert_eq!(tool_use_id, "toolu_01A");
-                assert_eq!(content, "Result for web_search");
-                assert!(!is_error);
-            }
-            _ => panic!("Expected ToolResult"),
-        }
     }
 
     #[tokio::test]

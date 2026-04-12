@@ -90,7 +90,16 @@ impl Scheduler {
                     .unwrap_or("Scheduled task triggered")
                     .to_string();
 
-                match crate::agent::run_agent_turn(&pool, &config, &user_id, &message, None).await {
+                match crate::agent::run_agent_turn(
+                    &pool,
+                    &config,
+                    &user_id,
+                    &message,
+                    None,
+                    crate::agent::ApprovalMode::AutoApprove,
+                )
+                .await
+                {
                     Ok(_) => {
                         tracing::info!(
                             "scheduled task '{task_name}' completed for user '{user_id}'"

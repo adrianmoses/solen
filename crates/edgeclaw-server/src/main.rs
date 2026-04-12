@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
         db: pool,
         config,
         oauth_flows,
+        sessions: edgeclaw_server::session::new_registry(),
     };
 
     let app = build_router(state);

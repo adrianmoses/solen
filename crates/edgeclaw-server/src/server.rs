@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 
 use crate::handlers;
 use crate::oauth::{OAuthFlows, ProviderConfig};
+use crate::session::SessionRegistry;
 
 /// Configuration for an auto-registered MCP skill.
 #[derive(Debug, Clone)]
@@ -167,6 +168,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: Arc<ServerConfig>,
     pub oauth_flows: OAuthFlows,
+    pub sessions: SessionRegistry,
 }
 
 #[derive(Serialize)]
@@ -182,7 +184,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/message", post(handlers::message_handler))
-        .route("/history", get(handlers::history_handler))
+        .route(
+            "/history",
+            get(handlers::history_handler).delete(handlers::clear_history_handler),
+        )
         .route("/skills/add", post(handlers::add_skill_handler))
         .route("/skills", get(handlers::list_skills_handler))
         .route("/approve", post(handlers::approve_handler))
@@ -196,6 +201,7 @@ pub fn build_router(state: AppState) -> Router {
             "/credentials/import-service-account",
             post(handlers::import_service_account_handler),
         )
+        .route("/ws", get(handlers::ws_handler))
         .route("/admin/skills/status", get(handlers::skill_status_handler))
         .route("/skills/{name}", delete(handlers::remove_skill_handler))
         .with_state(state)

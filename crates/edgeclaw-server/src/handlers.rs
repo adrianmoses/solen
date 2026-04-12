@@ -1,18 +1,26 @@
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use agent_core::ReqwestBackend;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::StatusCode,
-    response::Html,
+    response::{Html, IntoResponse},
     Json,
 };
 use chrono::Utc;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use skill_registry::SkillRow;
+use tokio::sync::mpsc;
 
 use crate::agent;
 use crate::server::AppState;
+use crate::session::{ClientMessage, ServerMessage, SessionHandle};
 
 // --- Request/Response types ---
 
@@ -59,10 +67,16 @@ pub async fn message_handler(
     State(state): State<AppState>,
     Json(body): Json<MessageRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let result =
-        agent::run_agent_turn(&state.db, &state.config, &body.user_id, &body.message, None)
-            .await
-            .map_err(internal_error)?;
+    let result = agent::run_agent_turn(
+        &state.db,
+        &state.config,
+        &body.user_id,
+        &body.message,
+        None,
+        agent::ApprovalMode::AutoApprove,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(result))
 }
 
@@ -91,6 +105,29 @@ pub async fn history_handler(
         .collect();
 
     Ok(Json(serde_json::json!(messages)))
+}
+
+pub async fn clear_history_handler(
+    State(state): State<AppState>,
+    Query(params): Query<UserIdQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let del_messages = sqlx::query("DELETE FROM messages WHERE user_id = ?")
+        .bind(&params.user_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    let del_approvals = sqlx::query("DELETE FROM pending_approvals WHERE user_id = ?")
+        .bind(&params.user_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "cleared",
+        "messages_deleted": del_messages.rows_affected(),
+        "approvals_deleted": del_approvals.rows_affected(),
+    })))
 }
 
 pub async fn add_skill_handler(
@@ -640,4 +677,133 @@ async fn handle_oauth_callback(
     .map_err(crate::oauth::OAuthError::CredentialStore)?;
 
     Ok(flow_state.provider)
+}
+
+// --- WebSocket handler ---
+
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+}
+
+async fn handle_ws_connection(socket: WebSocket, state: AppState) {
+    let (mut sink, mut stream) = socket.split();
+
+    // Wait for handshake message with user_id
+    let user_id = match stream.next().await {
+        Some(Ok(WsMessage::Text(text))) => {
+            let msg: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            match msg.get("user_id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    // Create channels
+    let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(32);
+    let pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // Register session
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(
+            session_id.clone(),
+            SessionHandle {
+                server_tx: server_tx.clone(),
+                user_id: user_id.clone(),
+                pending_approvals: pending_approvals.clone(),
+            },
+        );
+    }
+
+    // Send session_started to client
+    let _ = sink
+        .send(WsMessage::Text(
+            serde_json::to_string(&ServerMessage::SessionStarted {
+                session_id: session_id.clone(),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await;
+
+    // Outbound pump: server_rx -> WebSocket sink
+    let outbound = tokio::spawn(async move {
+        while let Some(msg) = server_rx.recv().await {
+            let text = serde_json::to_string(&msg).unwrap();
+            if sink.send(WsMessage::Text(text.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Inbound pump: WebSocket stream -> dispatch
+    let state2 = state.clone();
+    let user_id2 = user_id.clone();
+    let inbound = tokio::spawn(async move {
+        while let Some(Ok(ws_msg)) = stream.next().await {
+            let text = match ws_msg {
+                WsMessage::Text(t) => t.to_string(),
+                WsMessage::Close(_) => break,
+                _ => continue,
+            };
+
+            let client_msg: ClientMessage = match serde_json::from_str(&text) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            match client_msg {
+                ClientMessage::UserMessage { message } => {
+                    let db = state2.db.clone();
+                    let config = state2.config.clone();
+                    let uid = user_id2.clone();
+                    let stx = server_tx.clone();
+                    let pa = pending_approvals.clone();
+
+                    tokio::spawn(async move {
+                        let approval_mode = agent::ApprovalMode::Session {
+                            server_tx: stx.clone(),
+                            pending_approvals: pa,
+                        };
+                        if let Err(e) =
+                            agent::run_agent_turn(&db, &config, &uid, &message, None, approval_mode)
+                                .await
+                        {
+                            let _ = stx
+                                .send(ServerMessage::AgentError {
+                                    error: e.to_string(),
+                                })
+                                .await;
+                        }
+                    });
+                }
+                ClientMessage::ApprovalResponse {
+                    request_id,
+                    approved,
+                } => {
+                    let mut pending = pending_approvals.lock().unwrap();
+                    if let Some(tx) = pending.remove(&request_id) {
+                        let _ = tx.send(approved);
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for either task to finish (disconnect)
+    tokio::select! {
+        _ = outbound => {}
+        _ = inbound => {}
+    }
+
+    // Cleanup session
+    state.sessions.write().await.remove(&session_id);
 }

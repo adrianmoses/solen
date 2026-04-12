@@ -206,11 +206,6 @@ impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
         self.dispatch(tool_call).await
     }
-
-    #[allow(deprecated)]
-    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
-        is_destructive(&tool_call.name)
-    }
 }
 
 #[cfg(not(feature = "native"))]
@@ -218,11 +213,6 @@ impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
 impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
         self.dispatch(tool_call).await
-    }
-
-    #[allow(deprecated)]
-    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
-        is_destructive(&tool_call.name)
     }
 }
 

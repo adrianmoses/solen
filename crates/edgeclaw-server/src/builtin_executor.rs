@@ -63,6 +63,11 @@ impl BuiltinExecutor {
         }
     }
 
+    /// Check whether a tool call is allowed, denied, or requires approval.
+    pub fn check_permission(&self, tool_call: &ToolCall) -> PermissionCheck {
+        self.policy.check(tool_call)
+    }
+
     /// Returns all tool definitions: built-in tools + MCP skill tools.
     pub fn all_tools(&self) -> Vec<ToolDefinition> {
         let mut tools: Vec<ToolDefinition> =
@@ -84,13 +89,6 @@ impl ToolExecutor for BuiltinExecutor {
 
         // Fall through to MCP skill registry
         self.registry.execute(tool_call).await
-    }
-
-    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
-        match self.policy.check(tool_call) {
-            PermissionCheck::Allow => false,
-            PermissionCheck::Deny(_) | PermissionCheck::RequiresApproval(_) => true,
-        }
     }
 
     fn is_concurrent_safe(&self, tool_call: &ToolCall) -> bool {

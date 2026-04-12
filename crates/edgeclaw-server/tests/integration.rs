@@ -48,6 +48,7 @@ async fn test_app(mock_api_url: &str) -> axum::Router {
         db: pool,
         config,
         oauth_flows,
+        sessions: edgeclaw_server::session::new_registry(),
     };
     build_router(state)
 }
@@ -197,6 +198,7 @@ async fn test_app_with_state(mock_api_url: &str) -> (AppState, axum::Router) {
         db: pool,
         config: config.clone(),
         oauth_flows,
+        sessions: edgeclaw_server::session::new_registry(),
     };
     let router = build_router(state.clone());
     (state, router)
@@ -368,10 +370,9 @@ async fn test_approvals_empty() {
 
 #[tokio::test]
 async fn test_message_tool_use_then_end_turn() {
-    // Mock returns tool_use on first call. The tool "web_search" is an
-    // unregistered MCP tool, so the permission policy chain flags it as
-    // RequiresApproval (unknown tool). The agent loop breaks out with
-    // pending_tool_calls and status "awaiting_approval".
+    // Mock returns tool_use on first call, then end_turn on second.
+    // POST /message uses AutoApprove, so the tool executes (or errors)
+    // inline and the agent continues to the end_turn response.
     let mock_url = mock_anthropic_server(vec![TOOL_USE, END_TURN]).await;
     let app = test_app(&mock_url).await;
 
@@ -388,10 +389,9 @@ async fn test_message_tool_use_then_end_turn() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
-    // Unknown MCP tools require approval under the new permission policy
-    assert_eq!(body["status"], "awaiting_approval");
-    assert!(body["pending_approvals"].is_array());
-    assert_eq!(body["pending_approvals"][0]["name"], "web_search");
+    // With AutoApprove, the tool executes inline and agent completes
+    assert!(body["answer"].is_string());
+    assert!(body["pending_tool_calls"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -462,6 +462,121 @@ async fn test_multi_turn_conversation() {
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[2]["role"], "user");
     assert_eq!(messages[3]["role"], "assistant");
+}
+
+#[tokio::test]
+async fn test_clear_history_resets_agent_context() {
+    // A capturing mock that records the `messages` array from each LLM request.
+    use axum::extract::State as AxState;
+    use axum::routing::post;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    #[derive(Clone)]
+    struct CaptureMock {
+        captured: Arc<Mutex<Vec<serde_json::Value>>>,
+        counter: Arc<AtomicUsize>,
+    }
+
+    async fn capture_handler(
+        AxState(state): AxState<CaptureMock>,
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> axum::Json<serde_json::Value> {
+        // Record the messages array from the request
+        state
+            .captured
+            .lock()
+            .unwrap()
+            .push(body["messages"].clone());
+        state.counter.fetch_add(1, Ordering::Relaxed);
+        axum::Json(serde_json::from_str(END_TURN).unwrap())
+    }
+
+    let mock_state = CaptureMock {
+        captured: Arc::new(Mutex::new(Vec::new())),
+        counter: Arc::new(AtomicUsize::new(0)),
+    };
+    let captured = mock_state.captured.clone();
+
+    let mock_app = Router::new()
+        .route("/v1/messages", post(capture_handler))
+        .with_state(mock_state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mock_url = format!("http://{addr}");
+    tokio::spawn(async move { axum::serve(listener, mock_app).await.unwrap() });
+
+    let app = test_app(&mock_url).await;
+
+    // Turn 1: send a message — LLM receives 1 user message
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/message",
+            serde_json::json!({ "user_id": "test:clear", "message": "Hello" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Turn 2: send another — LLM receives prior history + new message
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/message",
+            serde_json::json!({ "user_id": "test:clear", "message": "Again" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    {
+        let reqs = captured.lock().unwrap();
+        // Second call should have 3 messages: user, assistant, user
+        assert_eq!(reqs[1].as_array().unwrap().len(), 3);
+    }
+
+    // Clear history
+    let resp = app
+        .clone()
+        .oneshot(delete_req("/history?user_id=test:clear"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["status"], "cleared");
+    assert_eq!(body["messages_deleted"], 4); // 2 user + 2 assistant
+
+    // Turn 3: send a message after clear — LLM should only see 1 user message
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/message",
+            serde_json::json!({ "user_id": "test:clear", "message": "Fresh start" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    {
+        let reqs = captured.lock().unwrap();
+        // Third LLM call (index 2) should have exactly 1 message (the new user message)
+        let messages_after_clear = reqs[2].as_array().unwrap();
+        assert_eq!(
+            messages_after_clear.len(),
+            1,
+            "After clearing history, the LLM should only receive the new user message"
+        );
+        assert_eq!(messages_after_clear[0]["role"], "user");
+    }
+
+    // History endpoint should only show the new turn (1 user + 1 assistant)
+    let resp = app
+        .oneshot(get("/history?user_id=test:clear"))
+        .await
+        .unwrap();
+    let body = json_body(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 2);
 }
 
 // --- Scheduled task tests ---

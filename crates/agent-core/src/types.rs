@@ -119,12 +119,6 @@ pub struct AgentContext {
 pub trait ToolExecutor: Send + Sync {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
 
-    /// Return true if this tool call requires human approval before execution.
-    /// Default: false (all tools are safe to execute inline).
-    fn needs_approval(&self, _tool_call: &ToolCall) -> bool {
-        false
-    }
-
     /// Return true if this tool can safely run concurrently with other tools.
     /// Default: false (sequential execution).
     fn is_concurrent_safe(&self, _tool_call: &ToolCall) -> bool {
@@ -136,11 +130,6 @@ pub trait ToolExecutor: Send + Sync {
 #[async_trait(?Send)]
 pub trait ToolExecutor {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
-
-    /// Return true if this tool call requires human approval before execution.
-    fn needs_approval(&self, _tool_call: &ToolCall) -> bool {
-        false
-    }
 
     /// Return true if this tool can safely run concurrently with other tools.
     fn is_concurrent_safe(&self, _tool_call: &ToolCall) -> bool {
@@ -192,7 +181,7 @@ mod tests {
                     is_error: false,
                 })
             }
-            // needs_approval and is_concurrent_safe use defaults
+            // is_concurrent_safe uses default
         }
 
         let executor = MinimalExecutor;
@@ -201,7 +190,6 @@ mod tests {
             name: "test".to_string(),
             input: serde_json::json!({}),
         };
-        assert!(!executor.needs_approval(&tc));
         assert!(!executor.is_concurrent_safe(&tc));
     }
 }
