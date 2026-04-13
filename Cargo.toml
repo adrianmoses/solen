@@ -6,6 +6,7 @@ members = [
     "crates/skill-registry",
     "crates/credential-store",
     "crates/edgeclaw-server",
+    "crates/edgeclaw-cli",
     "skills/mcp-server-util",
     "skills/skill-memory",
     "skills/skill-web-search",

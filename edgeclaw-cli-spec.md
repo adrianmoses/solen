@@ -45,7 +45,7 @@ edgeclaw serve [OPTIONS]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--port <port>` | u16 | `7000` | Port to listen on |
+| `--port <port>` | u16 | `7100` | Port to listen on |
 | `--host <host>` | string | `127.0.0.1` | Bind address |
 | `--daemonize` | bool | false | Fork into background after startup |
 | `--tls-cert <path>` | path | — | Path to TLS certificate (PEM). Requires `--tls-key` |
@@ -88,7 +88,7 @@ edgeclaw chat [OPTIONS]
 
 ### Spawn-or-attach behavior
 
-1. Attempt a WebSocket connect to `--connect` (default: `ws://127.0.0.1:7000`).
+1. Attempt a WebSocket connect to `--connect` (default: `ws://127.0.0.1:7100`).
 2. If the connection succeeds, attach to the running server. The server is left running on exit.
 3. If the connection is refused, spawn an in-process server on the default port, connect to it, and shut it down when the TUI exits.
 
@@ -96,7 +96,7 @@ edgeclaw chat [OPTIONS]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--connect <url>` | URL | `ws://127.0.0.1:7000` | WebSocket URL of a running server |
+| `--connect <url>` | URL | `ws://127.0.0.1:7100` | WebSocket URL of a running server |
 | `--agent <name>` | string | `default` | Agent personality to use (must exist in config) |
 | `--no-tui` | bool | false | Disable the TUI; use stdin/stdout line mode for piping or scripting |
 | `--session-id <id>` | string | — | Resume a named session if the server supports session persistence |
@@ -133,7 +133,7 @@ When the server emits a tool approval request, the TUI suspends normal input and
 edgeclaw chat
 
 # Attach to a remote server
-edgeclaw chat --connect ws://my-server.example.com:7000 --agent friday
+edgeclaw chat --connect ws://my-server.example.com:7100 --agent friday
 
 # Pipe mode: send a one-shot prompt and capture output
 echo "Summarise today's standup" | edgeclaw chat --no-tui
@@ -376,7 +376,7 @@ temperature = 1.0
 # ── Server ──────────────────────────────────────────────────────────────────
 [server]
 host = "127.0.0.1"
-port = 7000
+port = 7100
 
 # ── Approval ────────────────────────────────────────────────────────────────
 [approval]

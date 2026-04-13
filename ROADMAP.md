@@ -2,8 +2,8 @@
 
 > Focused roadmap for the next iterations of EdgeClaw.
 >
-> _Last updated: 2026-04-12. Previous iteration: WebSocket sessions and
-> non-blocking agent turns (PR #22)._
+> _Last updated: 2026-04-14. Previous iteration: CLI crate with `serve`
+> and `chat` commands._
 
 ---
 
@@ -26,6 +26,7 @@ agent turns run in non-blocking background tasks.
 - Credential encryption (AES-256-GCM + HKDF)
 - Docker Compose deployment with Caddy TLS termination
 - Skills: web-search, http-fetch, gmail, github, google-calendar
+- CLI crate (`edgeclaw-cli`) with `serve` and `chat` commands
 
 ---
 
@@ -35,24 +36,31 @@ The CLI provides three top-level verbs that cover the full local workflow:
 starting the server, chatting with the agent, and managing configuration.
 All persistent state lives in `~/.config/edgeclaw/config.toml`.
 
-### 1.1 Server Management (`edgeclaw serve`)
+### 1.1 Server Management (`edgeclaw serve`) ✓
 
 Start, stop, and monitor the WebSocket server locally or as a background daemon:
 
-- `edgeclaw serve` starts the server in foreground (default `127.0.0.1:7000`)
+- ✓ `edgeclaw serve` starts the server in foreground (default `127.0.0.1:7100`)
+- ✓ `--host` and `--port` flags override defaults
 - `--daemonize` forks into background; `--pid-file` for process management
 - Lifecycle subcommands: `serve status`, `serve stop`, `serve restart`
 - Optional TLS termination via `--tls-cert` / `--tls-key`
 
 ### 1.2 Chat Client (`edgeclaw chat`)
 
-A TUI chat session with spawn-or-attach behavior — zero-config entry point:
+REPL-like chat session with spawn-or-attach behavior — zero-config entry point:
 
-- Attempts WebSocket connect to `--connect` (default `ws://127.0.0.1:7000`)
-- If no server is running, spawns one in-process and tears it down on exit
-- `ratatui` TUI with inline tool approval prompts (`y`/`n`/`a`)
+- ✓ Attempts WebSocket connect to `--connect` (default `ws://127.0.0.1:7100/ws`)
+- ✓ If no server is running, spawns one in-process and tears it down on exit
+- ✓ Inline terminal UI with crossterm raw mode (no alternate screen)
+- ✓ Tool approval prompts (`y`/`n`) rendered inline
+- ✓ Colored output: `agent>`, `error>`, `[tool]` prefixes
+- ✓ Ctrl-C / Ctrl-D graceful disconnect
 - Pipe mode (`--no-tui`) for scripting: `echo "prompt" | edgeclaw chat --no-tui`
-- Named sessions via `--session-id` and agent selection via `--agent <name>`
+- Named sessions via `--session-id`
+- Agent personality selection via `--agent <name>`
+- Multiline input via Ctrl-J
+- `[a]` approve-all-in-session option
 
 ### 1.3 Configuration (`edgeclaw config`)
 
