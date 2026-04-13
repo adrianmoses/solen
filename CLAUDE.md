@@ -33,8 +33,8 @@ docker compose up --build
 
 ## Specs & Roadmap
 
-- **`ROADMAP.md`** — focused roadmap: CLI/TUI, Agent Soul, Sub-agents
-- **`EDGECLAW_TUI_SPEC.md`** — CLI setup wizard and management TUI
+- **`ROADMAP.md`** — focused roadmap: CLI, Agent Soul, Sub-agents
+- **`edgeclaw-cli-spec.md`** — CLI specification (serve, chat, config)
 - **`docs/archive/`** — archived specs: Architecture, Credentials, Agent Improvements, Temporal KG, VPS Migration, Cloudflare Workers (pre-migration)
 
 ## Testing Patterns

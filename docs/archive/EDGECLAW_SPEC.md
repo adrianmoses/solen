@@ -4,7 +4,7 @@
 > deployed via Docker Compose on a Hetzner VPS.
 >
 > _This spec supersedes the original Cloudflare Workers/Durable Objects spec (archived at `docs/archive/EDGECLAW_SPEC_CF.md`).
-> Companion specs: [Credentials](EDGECLAW_CREDENTIALS_SPEC.md), [TUI](EDGECLAW_TUI_SPEC.md)._
+> Companion specs: [Credentials](EDGECLAW_CREDENTIALS_SPEC.md), [CLI](edgeclaw-cli-spec.md)._
 
 ---
 
@@ -744,7 +744,7 @@ _Detail: [Credentials Spec](EDGECLAW_CREDENTIALS_SPEC.md) Phase 3_
 
 ### TUI — Setup Wizard (M5.14)
 
-_Detail: [TUI Spec](EDGECLAW_TUI_SPEC.md) Part 1_
+_Detail: [CLI Spec](edgeclaw-cli-spec.md)_
 
 | Milestone | Description | Done When |
 |---|---|---|
@@ -759,7 +759,7 @@ _Detail: [TUI Spec](EDGECLAW_TUI_SPEC.md) Part 1_
 
 ### TUI — Management Dashboard (M5.15)
 
-_Detail: [TUI Spec](EDGECLAW_TUI_SPEC.md) Part 2_
+_Detail: [CLI Spec](edgeclaw-cli-spec.md)_
 
 | Milestone | Description | Done When |
 |---|---|---|

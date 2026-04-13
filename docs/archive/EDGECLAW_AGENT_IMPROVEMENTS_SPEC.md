@@ -3,7 +3,7 @@
 > Improvements to the agent loop, tool execution, multi-agent coordination, and
 > retrieval-augmented generation (RAG).
 >
-> _Companion specs: [Architecture](EDGECLAW_SPEC.md), [Credentials](EDGECLAW_CREDENTIALS_SPEC.md), [TUI](EDGECLAW_TUI_SPEC.md)._
+> _Companion specs: [Architecture](EDGECLAW_SPEC.md), [Credentials](EDGECLAW_CREDENTIALS_SPEC.md), [CLI](edgeclaw-cli-spec.md)._
 
 ---
 

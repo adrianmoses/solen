@@ -29,42 +29,44 @@ agent turns run in non-blocking background tasks.
 
 ---
 
-## Phase 1 — CLI and TUI
+## Phase 1 — CLI
 
-With WebSocket support in place, we can provide a terminal-based chat interface
-that connects to the running server.
+The CLI provides three top-level verbs that cover the full local workflow:
+starting the server, chatting with the agent, and managing configuration.
+All persistent state lives in `~/.config/edgeclaw/config.toml`.
 
-### 1.1 CLI Chat Client
+### 1.1 Server Management (`edgeclaw serve`)
 
-A `chat` subcommand on `edgeclaw-cli` that opens a WebSocket connection to the
-server and provides an interactive REPL-style chat flow, built with `ratatui`.
+Start, stop, and monitor the WebSocket server locally or as a background daemon:
 
-- Connect to `ws://<host>/ws` with user ID handshake
-- Inline terminal output — conversation stays in scrollback history
-- Render agent responses as they arrive
-- Handle tool approval prompts inline (y/n confirmation in terminal)
-- Support `Ctrl+C` graceful disconnect
+- `edgeclaw serve` starts the server in foreground (default `127.0.0.1:7000`)
+- `--daemonize` forks into background; `--pid-file` for process management
+- Lifecycle subcommands: `serve status`, `serve stop`, `serve restart`
+- Optional TLS termination via `--tls-cert` / `--tls-key`
 
-### 1.2 Setup Wizard (from TUI spec)
+### 1.2 Chat Client (`edgeclaw chat`)
 
-The `edgeclaw setup` wizard using `inquire` for first-run configuration:
+A TUI chat session with spawn-or-attach behavior — zero-config entry point:
 
-- Stage 1: VPS connection (SSH host, user, key)
-- Stage 2: Agent identity (name, Telegram bot token)
-- Stage 3: LLM model selection and API key verification
-- Stage 4: Skill selection and OAuth credential collection
-- Pre-deployment summary and SSH-based deploy
+- Attempts WebSocket connect to `--connect` (default `ws://127.0.0.1:7000`)
+- If no server is running, spawns one in-process and tears it down on exit
+- `ratatui` TUI with inline tool approval prompts (`y`/`n`/`a`)
+- Pipe mode (`--no-tui`) for scripting: `echo "prompt" | edgeclaw chat --no-tui`
+- Named sessions via `--session-id` and agent selection via `--agent <name>`
 
-### 1.3 Management Dashboard
+### 1.3 Configuration (`edgeclaw config`)
 
-The `edgeclaw manage` persistent `ratatui` dashboard:
+Read, write, and interactively manage agent configuration:
 
-- Status screen with live data from `/admin/status`
-- Skills screen with OAuth status
-- Logs screen with live streaming and filters
-- Settings and secrets management
+- First-run wizard: guided setup for model, personality, and connectors
+- `config show` / `config edit` for viewing and direct TOML editing
+- `config set model` — provider, model ID, API key, temperature
+- `config set personality` — named personalities with system prompts
+- `config set approval` — tool approval mode (always-ask, auto-approve, allowlist)
+- `config set tools` — enable/disable individual tools
+- `config connector add|list|remove|test` — Telegram, Discord, Slack connectors
 
-**Specs:** [TUI Spec](EDGECLAW_TUI_SPEC.md)
+**Specs:** [CLI Spec](edgeclaw-cli-spec.md)
 
 ---
 
