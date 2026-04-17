@@ -6,8 +6,6 @@ RUN cargo install cargo-chef
 
 FROM chef AS planner
 COPY . .
-# Strip WASM skill crates from workspace (they depend on `worker` and can't build natively)
-RUN sed -i '/"skills\/skill-/d; /"skills\/mcp-server-util"/d' Cargo.toml
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: dependency cache — only rebuilt when Cargo.toml/Cargo.lock change
@@ -17,7 +15,6 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Stage 3: actual build — fast when only src/ changed
 COPY . .
-RUN sed -i '/"skills\/skill-/d; /"skills\/mcp-server-util"/d' Cargo.toml
 RUN cargo build --release --bin edgeclaw-server
 RUN strip /app/target/release/edgeclaw-server
 

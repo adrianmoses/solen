@@ -7,10 +7,10 @@ Personal AI agent runtime, self-hosted on a VPS via tokio + axum + sqlx + Docker
 ```
 WebSocket/HTTP ──> axum server ──> Agent (ReAct loop)
                         │                │
-                        ▼          ┌─────┴──────────┬──────────┐
-                     SQLite        ▼                ▼          ▼
-                              MemorySkill     WebSearch    HttpFetch
-                             (Docker svc)   (Docker svc) (Docker svc)
+                        ▼                ▼
+                     SQLite        external MCP skills
+                                   (e.g. workspace-mcp,
+                                    GitHub Copilot MCP)
 ```
 
 **Workspace crates:**
@@ -20,10 +20,10 @@ WebSocket/HTTP ──> axum server ──> Agent (ReAct loop)
 - `crates/edgeclaw-server` — axum + sqlx host with WebSocket sessions, scheduler, and human-in-the-loop tool approvals.
 - `crates/edgeclaw-cli` — CLI binary (`edgeclaw`) with `serve`, `chat`, `config`, and `soul` commands.
 
-**Skills** (independent Docker services in `skills/`):
-- `skills/skill-memory` — Key-value memory store with tags
-- `skills/skill-web-search` — Web search via Brave Search API
-- `skills/skill-http-fetch` — URL fetcher with HTML stripping
+**Skill context** (`SKILL.md` files in `skills/`, loaded into the system prompt when the matching skill is registered):
+- `skills/skill-github` — GitHub API via an external MCP server
+- `skills/skill-gmail` — Gmail via the Google Workspace MCP server
+- `skills/skill-google-calendar` — Google Calendar via the Google Workspace MCP server
 
 ## Prerequisites
 
@@ -209,13 +209,13 @@ curl -X POST http://localhost:8080/soul/generate \
 ### 7. Register a skill
 
 ```bash
-# Start skills via Docker Compose
+# Start the skill servers (e.g. Google Workspace MCP) via Docker Compose
 docker compose up -d
 
-# Register a skill
+# Register a skill by URL
 curl -X POST http://localhost:8080/skills/add \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "default", "name": "memory", "url": "http://localhost:8788"}'
+  -d '{"user_id": "default", "name": "google_workspace", "url": "http://workspace-mcp:8000"}'
 ```
 
 ## Testing
@@ -254,8 +254,6 @@ Configure via `.env` file (loaded automatically via dotenvy) or system environme
 | `MAX_TASKS_PER_USER` | `20` | Max scheduled tasks per user |
 | `SKILL_ENCRYPTION_KEY` | — | AES-256-GCM key for encrypting per-skill auth credentials |
 
-Skills use a separate `.env.skills` file for their environment (e.g., `BRAVE_SEARCH_API_KEY`).
-
 ## Deployment
 
 ```bash
@@ -290,11 +288,10 @@ edgeclaw/
 │       ├── chat/              # Terminal chat UI
 │       ├── config/            # Config management (model, personality, tools)
 │       └── soul.rs            # Soul subcommands (show, set, edit, generate, import, export)
-├── skills/
-│   ├── mcp-server-util/       # Shared JSON-RPC server helpers
-│   ├── skill-memory/          # Memory skill
-│   ├── skill-web-search/      # Brave Search skill
-│   └── skill-http-fetch/      # URL fetch skill
+├── skills/                    # SKILL.md files for external MCP skills
+│   ├── skill-github/          # GitHub MCP
+│   ├── skill-gmail/           # Gmail (via Google Workspace MCP)
+│   └── skill-google-calendar/ # Google Calendar (via Google Workspace MCP)
 ├── .env.example               # Environment variables template
 ├── docker-compose.yml         # Production deployment
 └── CLAUDE.md                  # Development conventions

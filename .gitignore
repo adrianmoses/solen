@@ -8,7 +8,6 @@ target/
 
 # Environment
 .env
-.env.skills
 
 # Node (legacy)
 node_modules/

@@ -33,8 +33,8 @@ docker compose up --build
 
 ## Specs & Roadmap
 
-- **`ROADMAP.md`** — focused roadmap: CLI, Agent Soul, Sub-agents
-- **`edgeclaw-cli-spec.md`** — CLI specification (serve, chat, config)
+- **`docs/specs/OVERVIEW.md`**, **`docs/specs/ARCHITECTURE.md`**, **`docs/specs/ROADMAP.md`** — canonical shipspec suite
+- **`docs/specs/GAP.md`** — CLI spec vs. implementation delta (supersedes the old `edgeclaw-cli-spec.md`)
 - **`docs/archive/`** — archived specs: Architecture, Credentials, Agent Improvements, Temporal KG, VPS Migration, Cloudflare Workers (pre-migration)
 
 ## Testing Patterns

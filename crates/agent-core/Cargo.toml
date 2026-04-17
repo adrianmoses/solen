@@ -10,16 +10,14 @@ async-trait = "0.1"
 thiserror = "1"
 serde_yaml = "0.9"
 futures-util = "0.3"
-
-[features]
-native = ["reqwest", "tokio", "glob", "regex", "walkdir"]
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.12", features = ["json"], optional = true }
 tokio = { version = "1", features = ["rt", "macros", "process", "fs", "time"], optional = true }
 glob = { version = "0.3", optional = true }
 regex = { version = "1", optional = true }
 walkdir = { version = "2", optional = true }
+
+[features]
+native = ["reqwest", "tokio", "glob", "regex", "walkdir"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

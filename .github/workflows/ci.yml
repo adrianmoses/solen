@@ -16,15 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
       - name: Check agent-core (native)
         run: cargo check -p agent-core
-
-      - name: Check agent-core (wasm32)
-        run: cargo check -p agent-core --target wasm32-unknown-unknown
 
       - name: Check mcp-client (native)
         run: cargo check -p mcp-client
@@ -34,21 +29,6 @@ jobs:
 
       - name: Check edgeclaw-server
         run: cargo check -p edgeclaw-server
-
-      - name: Check mcp-server-util
-        run: cargo check -p mcp-server-util
-
-      - name: Check skill-memory (wasm32)
-        run: cargo check -p skill-memory --target wasm32-unknown-unknown
-
-      - name: Check skill-web-search (wasm32)
-        run: cargo check -p skill-web-search --target wasm32-unknown-unknown
-
-      - name: Check skill-http-fetch (wasm32)
-        run: cargo check -p skill-http-fetch --target wasm32-unknown-unknown
-
-      - name: Check skill-schedule (wasm32)
-        run: cargo check -p skill-schedule --target wasm32-unknown-unknown
 
   test:
     name: Test
@@ -81,7 +61,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy agent-core
@@ -95,18 +74,3 @@ jobs:
 
       - name: Clippy edgeclaw-server
         run: cargo clippy -p edgeclaw-server -- -D warnings
-
-      - name: Clippy mcp-server-util
-        run: cargo clippy -p mcp-server-util -- -D warnings
-
-      - name: Clippy skill-memory (wasm32)
-        run: cargo clippy -p skill-memory --target wasm32-unknown-unknown -- -D warnings
-
-      - name: Clippy skill-web-search (wasm32)
-        run: cargo clippy -p skill-web-search --target wasm32-unknown-unknown -- -D warnings
-
-      - name: Clippy skill-http-fetch (wasm32)
-        run: cargo clippy -p skill-http-fetch --target wasm32-unknown-unknown -- -D warnings
-
-      - name: Clippy skill-schedule (wasm32)
-        run: cargo clippy -p skill-schedule --target wasm32-unknown-unknown -- -D warnings
