@@ -1,5 +1,6 @@
 mod chat;
 mod config;
+mod soul;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -34,6 +35,8 @@ enum Commands {
     Chat(ChatArgs),
     /// Read and write agent configuration
     Config(ConfigArgs),
+    /// View and manage the agent's soul (identity and personality)
+    Soul(SoulArgs),
 }
 
 #[derive(clap::Args)]
@@ -217,6 +220,76 @@ struct ConnectorTestArgs {
     name: String,
 }
 
+// ── Soul subcommands ───────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct SoulArgs {
+    /// Server host (default: from config or 127.0.0.1)
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    /// Server port (default: from config or 7100)
+    #[arg(long, default_value_t = 7100)]
+    port: u16,
+
+    /// User ID
+    #[arg(long, default_value = "default")]
+    user_id: String,
+
+    #[command(subcommand)]
+    command: Option<SoulCommands>,
+}
+
+#[derive(Subcommand)]
+enum SoulCommands {
+    /// Show current soul configuration
+    Show,
+    /// Update soul fields
+    Set(SoulSetArgs),
+    /// Open soul as SOUL.md in $EDITOR
+    Edit,
+    /// Generate a soul using the LLM from a description
+    Generate(SoulGenerateArgs),
+    /// Import soul from a SOUL.md file
+    Import(SoulImportArgs),
+    /// Export soul as SOUL.md to stdout
+    Export,
+}
+
+#[derive(clap::Args)]
+struct SoulSetArgs {
+    /// Agent name
+    #[arg(long)]
+    name: Option<String>,
+    /// Personality description
+    #[arg(long)]
+    personality: Option<String>,
+    /// Archetype: assistant, engineer, researcher, operator, mentor
+    #[arg(long)]
+    archetype: Option<String>,
+    /// Tone: neutral, friendly, direct, formal
+    #[arg(long)]
+    tone: Option<String>,
+    /// Verbosity: terse, balanced, thorough
+    #[arg(long)]
+    verbosity: Option<String>,
+    /// Decision style: cautious, balanced, autonomous
+    #[arg(long)]
+    decision_style: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct SoulGenerateArgs {
+    /// Short description of the desired personality
+    description: String,
+}
+
+#[derive(clap::Args)]
+struct SoulImportArgs {
+    /// Path to a SOUL.md file
+    file: String,
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -255,6 +328,38 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Chat(args) => chat::run_chat(args).await,
+        Commands::Soul(args) => {
+            let host = &args.host;
+            let port = args.port;
+            let user_id = &args.user_id;
+            match args.command {
+                None | Some(SoulCommands::Show) => soul::run_show(host, port, user_id).await,
+                Some(SoulCommands::Set(set_args)) => {
+                    soul::run_set(
+                        host,
+                        port,
+                        user_id,
+                        soul::SoulSetOpts {
+                            name: set_args.name,
+                            personality: set_args.personality,
+                            archetype: set_args.archetype,
+                            tone: set_args.tone,
+                            verbosity: set_args.verbosity,
+                            decision_style: set_args.decision_style,
+                        },
+                    )
+                    .await
+                }
+                Some(SoulCommands::Edit) => soul::run_edit(host, port, user_id).await,
+                Some(SoulCommands::Generate(gen_args)) => {
+                    soul::run_generate(host, port, user_id, &gen_args.description).await
+                }
+                Some(SoulCommands::Import(import_args)) => {
+                    soul::run_import(host, port, user_id, &import_args.file).await
+                }
+                Some(SoulCommands::Export) => soul::run_export(host, port, user_id).await,
+            }
+        }
         Commands::Config(config_args) => match config_args.command {
             None => config::wizard::run_wizard(&config_path),
             Some(ConfigCommands::Show(args)) => {

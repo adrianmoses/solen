@@ -102,16 +102,74 @@ async fn persist_messages(pool: &SqlitePool, user_id: &str, messages: &[Message]
     }
 }
 
-async fn load_system_prompt(pool: &SqlitePool, user_id: &str) -> String {
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM prefs WHERE user_id = ? AND key = 'system_prompt'",
+async fn load_soul(pool: &SqlitePool, user_id: &str) -> agent_core::soul::Soul {
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT name, personality, archetype, tone, verbosity, decision_style FROM souls WHERE user_id = ?",
     )
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "You are a helpful AI assistant.".to_string())
+    .unwrap_or(None);
+
+    match row {
+        Some((name, personality, archetype, tone, verbosity, decision_style)) => {
+            use std::str::FromStr;
+            agent_core::soul::Soul {
+                name,
+                personality,
+                archetype: agent_core::soul::Archetype::from_str(&archetype).unwrap_or_default(),
+                tone: agent_core::soul::Tone::from_str(&tone).unwrap_or_default(),
+                verbosity: agent_core::soul::Verbosity::from_str(&verbosity).unwrap_or_default(),
+                decision_style: agent_core::soul::DecisionStyle::from_str(&decision_style)
+                    .unwrap_or_default(),
+            }
+        }
+        None => {
+            // Backward compat: check prefs table for a custom system_prompt
+            let pref = sqlx::query_scalar::<_, String>(
+                "SELECT value FROM prefs WHERE user_id = ? AND key = 'system_prompt'",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+
+            match pref {
+                Some(custom_prompt) => agent_core::soul::Soul {
+                    name: String::new(),
+                    personality: custom_prompt,
+                    ..agent_core::soul::Soul::default()
+                },
+                None => agent_core::soul::Soul::default(),
+            }
+        }
+    }
+}
+
+/// Build the full system prompt from soul + skill contexts.
+async fn build_system_prompt(
+    pool: &SqlitePool,
+    user_id: &str,
+    skill_rows: &[SkillRow],
+    system_hint: Option<&str>,
+) -> String {
+    let soul = load_soul(pool, user_id).await;
+    let mut prompt = agent_core::soul::compose_system_prompt(&soul);
+
+    if let Some(hint) = system_hint {
+        prompt.push_str("\n\n");
+        prompt.push_str(hint);
+    }
+
+    for row in skill_rows {
+        if let Some(ctx) = &row.skill_context {
+            prompt.push_str("\n\n");
+            prompt.push_str(ctx);
+        }
+    }
+
+    prompt
 }
 
 async fn load_skills(pool: &SqlitePool, user_id: &str) -> Vec<SkillRow> {
@@ -198,20 +256,8 @@ pub async fn run_agent_turn(
     ensure_user(pool, user_id).await?;
 
     let messages = load_messages(pool, user_id, 50).await;
-    let mut system_prompt = load_system_prompt(pool, user_id).await;
-    if let Some(hint) = system_hint {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(hint);
-    }
     let skill_rows = load_skills(pool, user_id).await;
-
-    // Inject SKILL.md context into system prompt so the agent knows how to use skills
-    for row in &skill_rows {
-        if let Some(ctx) = &row.skill_context {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(ctx);
-        }
-    }
+    let system_prompt = build_system_prompt(pool, user_id, &skill_rows, system_hint).await;
 
     let llm_config = build_llm_config(config);
     let registry = build_registry(skill_rows)?;
@@ -322,10 +368,17 @@ pub async fn run_agent_turn(
             tool_results.push(tr);
         }
 
-        // Rebuild context from persisted + new messages
+        // Rebuild context from persisted + new messages.
+        // Re-compose the soul prompt (soul may not change mid-turn, but this
+        // keeps the prompt consistent with what was sent initially).
         let mut ctx_messages = load_messages(pool, user_id, 50).await;
         ctx_messages.extend(result.new_messages.clone());
-        let system_prompt = load_system_prompt(pool, user_id).await;
+        let soul = load_soul(pool, user_id).await;
+        let mut system_prompt = agent_core::soul::compose_system_prompt(&soul);
+        if let Some(hint) = system_hint {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(hint);
+        }
 
         let ctx = AgentContext {
             system_prompt,
@@ -399,8 +452,8 @@ pub async fn handle_approval(
         .await?;
 
     let messages = load_messages(pool, user_id, 50).await;
-    let system_prompt = load_system_prompt(pool, user_id).await;
     let skill_rows = load_skills(pool, user_id).await;
+    let system_prompt = build_system_prompt(pool, user_id, &skill_rows, None).await;
     let llm_config = build_llm_config(config);
 
     let registry = build_registry(skill_rows)?;

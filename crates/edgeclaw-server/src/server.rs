@@ -201,6 +201,13 @@ pub fn build_router(state: AppState) -> Router {
             "/credentials/import-service-account",
             post(handlers::import_service_account_handler),
         )
+        .route(
+            "/soul",
+            get(handlers::get_soul_handler)
+                .post(handlers::create_soul_handler)
+                .patch(handlers::patch_soul_handler),
+        )
+        .route("/soul/generate", post(handlers::generate_soul_handler))
         .route("/ws", get(handlers::ws_handler))
         .route("/admin/skills/status", get(handlers::skill_status_handler))
         .route("/skills/{name}", delete(handlers::remove_skill_handler))

@@ -2,6 +2,7 @@ pub mod agent;
 pub mod error;
 pub mod llm;
 pub mod permissions;
+pub mod soul;
 pub mod tools;
 pub mod types;
 

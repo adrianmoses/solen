@@ -18,6 +18,7 @@ WebSocket/HTTP ──> axum server ──> Agent (ReAct loop)
 - `crates/mcp-client` — JSON-RPC 2.0 MCP client for connecting to skill servers.
 - `crates/skill-registry` — Namespaced tool routing (`skill:tool`), implements `ToolExecutor`.
 - `crates/edgeclaw-server` — axum + sqlx host with WebSocket sessions, scheduler, and human-in-the-loop tool approvals.
+- `crates/edgeclaw-cli` — CLI binary (`edgeclaw`) with `serve`, `chat`, `config`, and `soul` commands.
 
 **Skills** (independent Docker services in `skills/`):
 - `skills/skill-memory` — Key-value memory store with tags
@@ -41,12 +42,24 @@ cp .env.example .env
 ### 2. Start the server
 
 ```bash
+# Via the CLI (default: 127.0.0.1:7100)
+cargo run -p edgeclaw-cli -- serve
+
+# Or directly via the server crate (default: 0.0.0.0:8080)
 cargo run -p edgeclaw-server
 ```
 
-The server starts at `http://localhost:8080`.
+### 3. Chat with the agent
 
-### 3. Connect via WebSocket
+The CLI provides a terminal chat UI that auto-starts the server if needed:
+
+```bash
+cargo run -p edgeclaw-cli -- chat
+```
+
+This opens an inline REPL with colored output, tool approval prompts, and graceful disconnect via Ctrl-C/Ctrl-D.
+
+### 4. Connect via WebSocket
 
 The primary interface is a WebSocket connection at `ws://localhost:8080/ws`. This enables bidirectional communication with the agent, including interactive tool approval prompts.
 
@@ -112,7 +125,88 @@ curl -X DELETE http://localhost:8080/history?user_id=default
 curl http://localhost:8080/skills?user_id=default
 ```
 
-### 4. Register a skill
+### 5. Configure the agent
+
+```bash
+# First-run wizard
+cargo run -p edgeclaw-cli -- config
+
+# Set model and API key
+cargo run -p edgeclaw-cli -- config set model --model claude-sonnet-4-20250514 --api-key sk-ant-...
+
+# Set approval mode
+cargo run -p edgeclaw-cli -- config set approval --mode auto-approve
+
+# Show current config
+cargo run -p edgeclaw-cli -- config show
+```
+
+### 6. Manage the agent's soul
+
+The soul defines the agent's identity and personality. It is injected into the system prompt on every turn.
+
+```bash
+# View current soul
+cargo run -p edgeclaw-cli -- soul
+
+# Set individual fields
+cargo run -p edgeclaw-cli -- soul set --name Atlas --archetype engineer --tone direct
+
+# Open soul as SOUL.md in your editor
+cargo run -p edgeclaw-cli -- soul edit
+
+# Generate a soul from a description (uses the LLM)
+cargo run -p edgeclaw-cli -- soul generate "a sarcastic DevOps expert who loves automation"
+
+# Import from a SOUL.md file
+cargo run -p edgeclaw-cli -- soul import my-agent.soul.md
+
+# Export current soul to stdout
+cargo run -p edgeclaw-cli -- soul export
+```
+
+**SOUL.md format:**
+
+```markdown
+---
+name: Atlas
+archetype: engineer
+tone: direct
+verbosity: balanced
+decision_style: autonomous
+---
+
+A sharp, systems-minded engineer who thinks in first principles...
+```
+
+Available archetypes: `assistant`, `engineer`, `researcher`, `operator`, `mentor`
+Tone: `neutral`, `friendly`, `direct`, `formal`
+Verbosity: `terse`, `balanced`, `thorough`
+Decision style: `cautious`, `balanced`, `autonomous`
+
+**REST API:**
+
+```bash
+# Get soul
+curl http://localhost:8080/soul?user_id=default
+
+# Create/replace soul
+curl -X POST http://localhost:8080/soul \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "default", "name": "Atlas", "archetype": "engineer", "tone": "direct"}'
+
+# Partial update
+curl -X PATCH http://localhost:8080/soul \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "default", "tone": "friendly"}'
+
+# LLM-assisted generation
+curl -X POST http://localhost:8080/soul/generate \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "default", "description": "a cheerful research assistant"}'
+```
+
+### 7. Register a skill
 
 ```bash
 # Start skills via Docker Compose
@@ -178,6 +272,7 @@ edgeclaw/
 │   ├── agent-core/src/        # Pure Rust agent library
 │   │   ├── agent.rs           # ReAct loop (run + resume)
 │   │   ├── llm.rs             # Anthropic API client + HttpBackend trait
+│   │   ├── soul.rs            # Soul types, prompt composer, SOUL.md parsing
 │   │   ├── types.rs           # Domain types + ToolExecutor trait
 │   │   └── error.rs           # AgentError enum
 │   ├── mcp-client/src/        # MCP protocol client
@@ -185,10 +280,16 @@ edgeclaw/
 │   │   └── client.rs          # McpClient (initialize, list_tools, call_tool)
 │   ├── skill-registry/src/    # Skill routing layer
 │   │   └── lib.rs             # SkillRegistry, SkillRow, namespaced dispatch
-│   └── edgeclaw-server/src/   # axum + sqlx server
-│       ├── main.rs            # Entry point
-│       ├── server.rs          # Router, AppState, ServerConfig
-│       └── session.rs         # WebSocket sessions, approval channels
+│   ├── edgeclaw-server/src/   # axum + sqlx server
+│   │   ├── main.rs            # Entry point
+│   │   ├── server.rs          # Router, AppState, ServerConfig
+│   │   ├── agent.rs           # Agent turn harness, soul loading
+│   │   └── session.rs         # WebSocket sessions, approval channels
+│   └── edgeclaw-cli/src/      # CLI binary
+│       ├── main.rs            # Command dispatch (serve, chat, config, soul)
+│       ├── chat/              # Terminal chat UI
+│       ├── config/            # Config management (model, personality, tools)
+│       └── soul.rs            # Soul subcommands (show, set, edit, generate, import, export)
 ├── skills/
 │   ├── mcp-server-util/       # Shared JSON-RPC server helpers
 │   ├── skill-memory/          # Memory skill

@@ -679,6 +679,378 @@ async fn handle_oauth_callback(
     Ok(flow_state.provider)
 }
 
+// --- Soul handlers ---
+
+#[derive(Deserialize)]
+pub struct CreateSoulRequest {
+    pub user_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub personality: Option<String>,
+    #[serde(default)]
+    pub archetype: Option<String>,
+    #[serde(default)]
+    pub tone: Option<String>,
+    #[serde(default)]
+    pub verbosity: Option<String>,
+    #[serde(default)]
+    pub decision_style: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PatchSoulRequest {
+    pub user_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub personality: Option<String>,
+    #[serde(default)]
+    pub archetype: Option<String>,
+    #[serde(default)]
+    pub tone: Option<String>,
+    #[serde(default)]
+    pub verbosity: Option<String>,
+    #[serde(default)]
+    pub decision_style: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GenerateSoulRequest {
+    pub user_id: String,
+    pub description: String,
+}
+
+fn parse_soul_row(
+    name: String,
+    personality: String,
+    archetype: String,
+    tone: String,
+    verbosity: String,
+    decision_style: String,
+) -> agent_core::soul::Soul {
+    use agent_core::soul::*;
+    Soul {
+        name,
+        personality,
+        archetype: archetype.parse().unwrap_or_default(),
+        tone: tone.parse().unwrap_or_default(),
+        verbosity: verbosity.parse().unwrap_or_default(),
+        decision_style: decision_style.parse().unwrap_or_default(),
+    }
+}
+
+fn soul_to_json(soul: &agent_core::soul::Soul) -> serde_json::Value {
+    serde_json::json!({
+        "name": soul.name,
+        "personality": soul.personality,
+        "archetype": soul.archetype.to_string(),
+        "tone": soul.tone.to_string(),
+        "verbosity": soul.verbosity.to_string(),
+        "decision_style": soul.decision_style.to_string(),
+    })
+}
+
+pub async fn get_soul_handler(
+    State(state): State<AppState>,
+    Query(params): Query<UserIdQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT name, personality, archetype, tone, verbosity, decision_style FROM souls WHERE user_id = ?",
+    )
+    .bind(&params.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    let soul = match row {
+        Some((name, personality, archetype, tone, verbosity, decision_style)) => parse_soul_row(
+            name,
+            personality,
+            archetype,
+            tone,
+            verbosity,
+            decision_style,
+        ),
+        None => agent_core::soul::Soul::default(),
+    };
+
+    Ok(Json(soul_to_json(&soul)))
+}
+
+pub async fn create_soul_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CreateSoulRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use agent_core::soul::*;
+
+    // Validate enum values
+    let archetype: Archetype = body
+        .archetype
+        .as_deref()
+        .unwrap_or("assistant")
+        .parse()
+        .map_err(bad_request)?;
+    let tone: Tone = body
+        .tone
+        .as_deref()
+        .unwrap_or("neutral")
+        .parse()
+        .map_err(bad_request)?;
+    let verbosity: Verbosity = body
+        .verbosity
+        .as_deref()
+        .unwrap_or("balanced")
+        .parse()
+        .map_err(bad_request)?;
+    let decision_style: DecisionStyle = body
+        .decision_style
+        .as_deref()
+        .unwrap_or("balanced")
+        .parse()
+        .map_err(bad_request)?;
+
+    agent::ensure_user(&state.db, &body.user_id)
+        .await
+        .map_err(internal_error)?;
+
+    let now = agent::now_millis();
+    sqlx::query(
+        "INSERT OR REPLACE INTO souls (user_id, name, personality, archetype, tone, verbosity, decision_style, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&body.user_id)
+    .bind(&body.name)
+    .bind(body.personality.as_deref().unwrap_or(""))
+    .bind(archetype.to_string())
+    .bind(tone.to_string())
+    .bind(verbosity.to_string())
+    .bind(decision_style.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    let soul = Soul {
+        name: body.name,
+        personality: body.personality.unwrap_or_default(),
+        archetype,
+        tone,
+        verbosity,
+        decision_style,
+    };
+
+    Ok(Json(soul_to_json(&soul)))
+}
+
+pub async fn patch_soul_handler(
+    State(state): State<AppState>,
+    Json(body): Json<PatchSoulRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use agent_core::soul::*;
+
+    agent::ensure_user(&state.db, &body.user_id)
+        .await
+        .map_err(internal_error)?;
+
+    // Load existing or default
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT name, personality, archetype, tone, verbosity, decision_style FROM souls WHERE user_id = ?",
+    )
+    .bind(&body.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    let mut soul = match row {
+        Some((name, personality, archetype, tone, verbosity, decision_style)) => parse_soul_row(
+            name,
+            personality,
+            archetype,
+            tone,
+            verbosity,
+            decision_style,
+        ),
+        None => Soul::default(),
+    };
+
+    // Apply patches
+    if let Some(name) = body.name {
+        soul.name = name;
+    }
+    if let Some(personality) = body.personality {
+        soul.personality = personality;
+    }
+    if let Some(archetype) = body.archetype {
+        soul.archetype = archetype.parse().map_err(bad_request)?;
+    }
+    if let Some(tone) = body.tone {
+        soul.tone = tone.parse().map_err(bad_request)?;
+    }
+    if let Some(verbosity) = body.verbosity {
+        soul.verbosity = verbosity.parse().map_err(bad_request)?;
+    }
+    if let Some(decision_style) = body.decision_style {
+        soul.decision_style = decision_style.parse().map_err(bad_request)?;
+    }
+
+    let now = agent::now_millis();
+    sqlx::query(
+        "INSERT INTO souls (user_id, name, personality, archetype, tone, verbosity, decision_style, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET name = excluded.name, personality = excluded.personality, archetype = excluded.archetype, tone = excluded.tone, verbosity = excluded.verbosity, decision_style = excluded.decision_style, updated_at = excluded.updated_at",
+    )
+    .bind(&body.user_id)
+    .bind(&soul.name)
+    .bind(&soul.personality)
+    .bind(soul.archetype.to_string())
+    .bind(soul.tone.to_string())
+    .bind(soul.verbosity.to_string())
+    .bind(soul.decision_style.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(soul_to_json(&soul)))
+}
+
+pub async fn generate_soul_handler(
+    State(state): State<AppState>,
+    Json(body): Json<GenerateSoulRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use agent_core::soul::*;
+    use agent_core::{LlmClient, LlmConfig, ReqwestBackend};
+
+    agent::ensure_user(&state.db, &body.user_id)
+        .await
+        .map_err(internal_error)?;
+
+    let llm_config = LlmConfig {
+        api_key: state.config.anthropic_api_key.clone().unwrap_or_default(),
+        model: state
+            .config
+            .default_model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
+        base_url: state.config.anthropic_base_url.clone(),
+        max_tokens: 1024,
+    };
+
+    let llm = LlmClient::new(llm_config, ReqwestBackend::new());
+
+    let gen_prompt = format!(
+        r#"Generate an AI agent personality based on this description: "{}"
+
+Return ONLY a JSON object with these fields:
+- "name": a short name for the agent (1-2 words)
+- "personality": a 1-3 sentence personality description
+- "archetype": one of: assistant, engineer, researcher, operator, mentor
+- "tone": one of: neutral, friendly, direct, formal
+- "verbosity": one of: terse, balanced, thorough
+- "decision_style": one of: cautious, balanced, autonomous
+
+Return raw JSON only, no markdown fences or explanation."#,
+        body.description
+    );
+
+    let messages = vec![agent_core::Message {
+        role: agent_core::Role::User,
+        content: vec![agent_core::ContentBlock::Text { text: gen_prompt }],
+        created_at: agent::now_millis(),
+    }];
+    let system = "You are a configuration generator. Return only valid JSON.";
+
+    let result = llm
+        .send_message(system, &messages, &[])
+        .await
+        .map_err(internal_error)?;
+
+    // Extract text from response
+    let response_text = result
+        .content
+        .iter()
+        .filter_map(|block| {
+            if let agent_core::ContentBlock::Text { text } = block {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    // Parse JSON from response (handle potential markdown fences)
+    let json_str = response_text
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| response_text.trim().strip_prefix("```"))
+        .unwrap_or(response_text.trim());
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+    let generated: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| bad_request(format!("failed to parse LLM response as JSON: {e}")))?;
+
+    // Extract and validate fields
+    let name = generated
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Agent")
+        .to_string();
+    let personality = generated
+        .get("personality")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let archetype: Archetype = generated
+        .get("archetype")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+    let tone: Tone = generated
+        .get("tone")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+    let verbosity: Verbosity = generated
+        .get("verbosity")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+    let decision_style: DecisionStyle = generated
+        .get("decision_style")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+
+    let soul = Soul {
+        name,
+        personality,
+        archetype,
+        tone,
+        verbosity,
+        decision_style,
+    };
+
+    // Persist the generated soul
+    let now = agent::now_millis();
+    sqlx::query(
+        "INSERT OR REPLACE INTO souls (user_id, name, personality, archetype, tone, verbosity, decision_style, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&body.user_id)
+    .bind(&soul.name)
+    .bind(&soul.personality)
+    .bind(soul.archetype.to_string())
+    .bind(soul.tone.to_string())
+    .bind(soul.verbosity.to_string())
+    .bind(soul.decision_style.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(soul_to_json(&soul)))
+}
+
 // --- WebSocket handler ---
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
